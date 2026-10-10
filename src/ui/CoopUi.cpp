@@ -14,6 +14,8 @@
 
 #include "CoopUiApi.h"
 #include "NativeEdit.h"
+#include "UiPrivacy.h"
+#include "UiSession.h"
 
 #include <kenshi/Globals.h>          // ::gui (ForgottenGUI*, KenshiLib data export)
 #include <kenshi/gui/ForgottenGUI.h>
@@ -41,7 +43,7 @@
 #include "../plugin/core/PlayerNick.h"  // parsePlayerNick (nick field)
 
 // ---- In-game co-op session panel (F2) ----------------------------------------
-// One native Kenshi window (createDatapanel: rust frame, caption, close button)
+// Main native Kenshi window (createDatapanel: rust frame, caption, close button)
 // toggled with F2. Its client area holds widgets minted with ForgottenGUI's
 // own factories and Kenshi's installed skins, laid out once per build in two
 // columns above a footer:
@@ -53,7 +55,7 @@
 //   right  = RESULT: one primary status, role / link, real milestones derived
 //            from the snapshot's network and world phases, transfer progress,
 //            the real roster, and the mod-updater line as its own section.
-//            Folded diagnostics replace milestones + roster while open;
+//            Diagnostics use a separate movable native window with a scrollbar;
 //   footer = version + hide hint, Discord, Diagnostics, Copy report, Hide.
 // Widgets persist while the window lives: a tick only rewrites the captions,
 // colours and visibility that changed, at most 10 times a second.
@@ -306,7 +308,7 @@ const char kRoleJoin[] =
 const char kHdrNick[] =
     "\xD0\x92\xD0\x90\xD0\xA8 \xD0\x9D\xD0\x98\xD0\x9A"; // ВАШ НИК
 const char kNickHint[] =
-    "\xD0\x9D\xD0\xB8\xD0\xBA \xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD0\xB0, \xD0\xB2\xD0\xB8\xD0\xB4\xD0\xB8\xD0\xBC\xD1\x8B\xD0\xB9 \xD0\xB4\xD1\x80\xD1\x83\xD0\xB3\xD0\xB8\xD0\xBC \xD0\xB2 \xD1\x81\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD0\xB8."; // Ник игрока, видимый другим в сессии.
+    "\xD0\x9D\xD0\xB8\xD0\xBA \xD0\xB2\xD0\xB8\xD0\xB4\xD0\xB5\xD0\xBD \xD0\xB4\xD1\x80\xD1\x83\xD0\xB3\xD0\xB8\xD0\xBC. \xD0\x94\xD0\xBE 4 \xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD0\xBE\xD0\xB2, \xD0\xB2\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB0\xD1\x8F \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB0."; // Ник виден другим. До 4 игроков, включая хоста.
 const char kHdrTransport[] =
     "\xD0\xA1\xD0\x9F\xD0\x9E\xD0\xA1\xD0\x9E\xD0\x91 \xD0\x9F\xD0\x9E\xD0\x94\xD0\x9A\xD0\x9B\xD0\xAE\xD0\xA7\xD0\x95\xD0\x9D\xD0\x98\xD0\xAF"; // СПОСОБ ПОДКЛЮЧЕНИЯ
 const char kTrSteam[] =
@@ -328,9 +330,9 @@ const char kCopy[] =
 const char kSteamMissing[] =
     "Steam \xD0\xBD\xD0\xB5 \xD0\xBD\xD0\xB0\xD0\xB9\xD0\xB4\xD0\xB5\xD0\xBD"; // Steam не найден
 const char kHostHintSteam[] =
-    "\xD0\x9E\xD1\x82\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB2\xD1\x8C\xD1\x82\xD0\xB5 \xD1\x8D\xD1\x82\xD0\xBE\xD1\x82 Steam ID \xD0\xB4\xD1\x80\xD1\x83\xD0\xB7\xD1\x8C\xD1\x8F\xD0\xBC. \xD0\x9A \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD1\x83 \xD0\xBC\xD0\xBE\xD0\xB3\xD1\x83\xD1\x82 \xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB8\xD1\x82\xD1\x8C\xD1\x81\xD1\x8F \xD0\xB4\xD0\xBE 3 \xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD0\xBE\xD0\xB2."; // Отправьте этот Steam ID друзьям. К хосту могут подключиться до 3 игроков.
+    "\xD0\x92\xD1\x8B \xD0\xB8 \xD0\xB4\xD0\xBE 3 \xD0\xB4\xD1\x80\xD1\x83\xD0\xB7\xD0\xB5\xD0\xB9. \xD0\x9E\xD1\x82\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB2\xD1\x8C\xD1\x82\xD0\xB5 \xD0\xB8\xD0\xBC \xD1\x8D\xD1\x82\xD0\xBE\xD1\x82 Steam ID."; // Вы и до 3 друзей. Отправьте им этот Steam ID.
 const char kHostHintUdp[] =
-    "\xD0\x94\xD1\x80\xD1\x83\xD0\xB7\xD1\x8C\xD1\x8F \xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB0\xD1\x8E\xD1\x82\xD1\x81\xD1\x8F \xD0\xBA \xD0\xB2\xD0\xB0\xD1\x88\xD0\xB5\xD0\xBC\xD1\x83 IP \xD0\xB8 \xD1\x8D\xD1\x82\xD0\xBE\xD0\xBC\xD1\x83 \xD0\xBF\xD0\xBE\xD1\x80\xD1\x82\xD1\x83. \xD0\xA7\xD0\xB5\xD1\x80\xD0\xB5\xD0\xB7 \xD0\xB8\xD0\xBD\xD1\x82\xD0\xB5\xD1\x80\xD0\xBD\xD0\xB5\xD1\x82 \xD0\xBD\xD1\x83\xD0\xB6\xD0\xB5\xD0\xBD \xD0\xBF\xD1\x80\xD0\xBE\xD0\xB1\xD1\x80\xD0\xBE\xD1\x81 UDP-\xD0\xBF\xD0\xBE\xD1\x80\xD1\x82\xD0\xB0."; // Друзья подключаются к вашему IP и этому порту. Через интернет нужен проброс UDP-порта.
+    "\xD0\x92\xD1\x8B \xD0\xB8 \xD0\xB4\xD0\xBE 3 \xD0\xB4\xD1\x80\xD1\x83\xD0\xB7\xD0\xB5\xD0\xB9. \xD0\x94\xD1\x80\xD1\x83\xD0\xB7\xD1\x8C\xD1\x8F\xD0\xBC \xD0\xBD\xD1\x83\xD0\xB6\xD0\xBD\xD1\x8B \xD0\xB2\xD0\xB0\xD1\x88 IP \xD0\xB8 \xD1\x8D\xD1\x82\xD0\xBE\xD1\x82 \xD0\xBF\xD0\xBE\xD1\x80\xD1\x82. \xD0\x94\xD0\xBB\xD1\x8F \xD0\xB8\xD0\xBD\xD1\x82\xD0\xB5\xD1\x80\xD0\xBD\xD0\xB5\xD1\x82\xD0\xB0 \xD0\xBD\xD1\x83\xD0\xB6\xD0\xBD\xD0\xBE \xD0\xBE\xD1\x82\xD0\xBA\xD1\x80\xD1\x8B\xD1\x82\xD1\x8C UDP-\xD0\xBF\xD0\xBE\xD1\x80\xD1\x82."; // Вы и до 3 друзей. Друзьям нужны ваш IP и этот порт. Для интернета нужно открыть UDP-порт.
 const char kJoinHintSteam[] =
     "\xD0\x9D\xD1\x83\xD0\xB6\xD0\xB5\xD0\xBD SteamID64 \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB0 - 17 \xD1\x86\xD0\xB8\xD1\x84\xD1\x80, \xD0\xB0 \xD0\xBD\xD0\xB5 \xD0\xB8\xD0\xBC\xD1\x8F \xD0\xB0\xD0\xBA\xD0\xBA\xD0\xB0\xD1\x83\xD0\xBD\xD1\x82\xD0\xB0 \xD0\xB8 \xD0\xBD\xD0\xB5 Lobby ID."; // Нужен SteamID64 хоста - 17 цифр, а не имя аккаунта и не Lobby ID.
 const char kJoinHintUdp[] =
@@ -404,41 +406,41 @@ const char kValUdp[] =
 const char kChanPending[] =
     "\xD0\xB2\xD1\x8B\xD0\xB1\xD0\xB8\xD1\x80\xD0\xB0\xD0\xB5\xD1\x82\xD1\x81\xD1\x8F..."; // выбирается...
 const char kStOffline[] =
-    "\xD0\x9D\xD0\xB5 \xD0\xB2 \xD1\x81\xD0\xB5\xD1\x82\xD0\xB8"; // Не в сети
+    "\xD0\xA1\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD1\x8F \xD0\xBD\xD0\xB5 \xD1\x81\xD0\xBE\xD0\xB7\xD0\xB4\xD0\xB0\xD0\xBD\xD0\xB0"; // Сессия не создана
 const char kStStartingHost[] =
     "\xD0\x97\xD0\xB0\xD0\xBF\xD1\x83\xD1\x81\xD0\xBA \xD1\x81\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD0\xB8..."; // Запуск сессии...
 const char kStStartingJoin[] =
     "\xD0\x97\xD0\xB0\xD0\xBF\xD1\x83\xD1\x81\xD0\xBA \xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xB8\xD1\x8F..."; // Запуск подключения...
 const char kStHostingWait[] =
-    "\xD0\xA1\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD1\x8F \xD0\xB7\xD0\xB0\xD0\xBF\xD1\x83\xD1\x89\xD0\xB5\xD0\xBD\xD0\xB0, \xD0\xB6\xD0\xB4\xD1\x91\xD0\xBC \xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD0\xBE\xD0\xB2"; // Сессия запущена, ждём игроков
+    "\xD0\x9C\xD0\xB8\xD1\x80 \xD0\xB3\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2. \xD0\x96\xD0\xB4\xD1\x91\xD0\xBC \xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD0\xBE\xD0\xB2"; // Мир готов. Ждём игроков
 const char kStHostingPlayers[] =
-    "\xD0\xA1\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD1\x8F \xD0\xB7\xD0\xB0\xD0\xBF\xD1\x83\xD1\x89\xD0\xB5\xD0\xBD\xD0\xB0"; // Сессия запущена
+    "\xD0\x93\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2\xD1\x8B \xD0\xBA \xD0\xB8\xD0\xB3\xD1\x80\xD0\xB5"; // Готовы к игре
 const char kStHostNoWorld[] =
-    "\xD0\xA1\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD1\x8F \xD0\xB7\xD0\xB0\xD0\xBF\xD1\x83\xD1\x89\xD0\xB5\xD0\xBD\xD0\xB0: \xD0\xB7\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xB8\xD1\x82\xD0\xB5 \xD0\xB8\xD0\xBB\xD0\xB8 \xD0\xBD\xD0\xB0\xD1\x87\xD0\xBD\xD0\xB8\xD1\x82\xD0\xB5 \xD0\xB8\xD0\xB3\xD1\x80\xD1\x83"; // Сессия запущена: загрузите или начните игру
+    "\xD0\xA1\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD1\x8F \xD1\x81\xD0\xBE\xD0\xB7\xD0\xB4\xD0\xB0\xD0\xBD\xD0\xB0"; // Сессия создана
 const char kStHostSending[] =
-    "\xD0\xA1\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD1\x8F \xD0\xB7\xD0\xB0\xD0\xBF\xD1\x83\xD1\x89\xD0\xB5\xD0\xBD\xD0\xB0: \xD0\xBC\xD0\xB8\xD1\x80 \xD0\xBE\xD1\x82\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB2\xD0\xBB\xD1\x8F\xD0\xB5\xD1\x82\xD1\x81\xD1\x8F \xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD1\x83"; // Сессия запущена: мир отправляется игроку
+    "\xD0\x9F\xD0\xBE\xD0\xB4\xD0\xB3\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2\xD0\xBA\xD0\xB0 \xD0\xBC\xD0\xB8\xD1\x80\xD0\xB0"; // Подготовка мира
 const char kStHostLoading[] =
-    "\xD0\xA1\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD1\x8F \xD0\xB7\xD0\xB0\xD0\xBF\xD1\x83\xD1\x89\xD0\xB5\xD0\xBD\xD0\xB0: \xD0\xB7\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xBA\xD0\xB0 \xD0\xBC\xD0\xB8\xD1\x80\xD0\xB0"; // Сессия запущена: загрузка мира
+    "\xD0\x9C\xD0\xB8\xD1\x80 \xD0\xB7\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB6\xD0\xB0\xD0\xB5\xD1\x82\xD1\x81\xD1\x8F"; // Мир загружается
 const char kStConnecting[] =
     "\xD0\x9F\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB5 \xD0\xBA \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD1\x83..."; // Подключение к хосту...
 const char kStHandshake[] =
-    "\xD0\xA1\xD0\xB2\xD1\x8F\xD0\xB7\xD1\x8C \xD1\x81 \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xBE\xD0\xBC \xD0\xB5\xD1\x81\xD1\x82\xD1\x8C, \xD1\x81\xD0\xBE\xD0\xB3\xD0\xBB\xD0\xB0\xD1\x81\xD0\xBE\xD0\xB2\xD0\xB0\xD0\xBD\xD0\xB8\xD0\xB5..."; // Связь с хостом есть, согласование...
+    "\xD0\xA1\xD0\xBE\xD0\xB3\xD0\xBB\xD0\xB0\xD1\x81\xD0\xBE\xD0\xB2\xD0\xB0\xD0\xBD\xD0\xB8\xD0\xB5 \xD1\x81 \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xBE\xD0\xBC"; // Согласование с хостом
 const char kStConnected[] =
-    "\xD0\x9F\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xBE \xD0\xBA \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD1\x83"; // Подключено к хосту
+    "\xD0\xA1\xD0\xB5\xD1\x82\xD1\x8C \xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xB0"; // Сеть подключена
 const char kStConnWaiting[] =
-    "\xD0\x9F\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xBE, \xD0\xB6\xD0\xB4\xD1\x91\xD0\xBC \xD0\xBC\xD0\xB8\xD1\x80 \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB0"; // Подключено, ждём мир хоста
+    "\xD0\x9E\xD0\xB6\xD0\xB8\xD0\xB4\xD0\xB0\xD0\xBD\xD0\xB8\xD0\xB5 \xD0\xBC\xD0\xB8\xD1\x80\xD0\xB0 \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB0"; // Ожидание мира хоста
 const char kStConnPreparing[] =
-    "\xD0\x9F\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xBE, \xD1\x85\xD0\xBE\xD1\x81\xD1\x82 \xD0\xB3\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2\xD0\xB8\xD1\x82 \xD0\xBC\xD0\xB8\xD1\x80"; // Подключено, хост готовит мир
+    "\xD0\xA5\xD0\xBE\xD1\x81\xD1\x82 \xD0\xB3\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2\xD0\xB8\xD1\x82 \xD0\xBC\xD0\xB8\xD1\x80"; // Хост готовит мир
 const char kStConnReceiving[] =
-    "\xD0\x9F\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xBE, \xD0\xBF\xD0\xBE\xD0\xBB\xD1\x83\xD1\x87\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB5 \xD0\xBC\xD0\xB8\xD1\x80\xD0\xB0 \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB0"; // Подключено, получение мира хоста
+    "\xD0\x9F\xD0\xBE\xD0\xBB\xD1\x83\xD1\x87\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB5 \xD0\xBC\xD0\xB8\xD1\x80\xD0\xB0"; // Получение мира
 const char kStConnLoading[] =
-    "\xD0\x9F\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xBE, \xD0\xB7\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xBA\xD0\xB0 \xD0\xBC\xD0\xB8\xD1\x80\xD0\xB0"; // Подключено, загрузка мира
+    "\xD0\x97\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xBA\xD0\xB0 \xD0\xBC\xD0\xB8\xD1\x80\xD0\xB0"; // Загрузка мира
 const char kStConnReady[] =
-    "\xD0\x92 \xD0\xB8\xD0\xB3\xD1\x80\xD0\xB5: \xD0\xBC\xD0\xB8\xD1\x80 \xD0\xB7\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB6\xD0\xB5\xD0\xBD"; // В игре: мир загружен
+    "\xD0\x93\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2 \xD0\xBA \xD0\xB8\xD0\xB3\xD1\x80\xD0\xB5"; // Готов к игре
 const char kStConnWorldFailed[] =
-    "\xD0\x9F\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xBE, \xD0\xBD\xD0\xBE \xD0\xBC\xD0\xB8\xD1\x80 \xD0\xBD\xD0\xB5 \xD0\xB7\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xB8\xD0\xBB\xD1\x81\xD1\x8F"; // Подключено, но мир не загрузился
+    "\xD0\x9E\xD1\x88\xD0\xB8\xD0\xB1\xD0\xBA\xD0\xB0 \xD0\xB7\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xBA\xD0\xB8 \xD0\xBC\xD0\xB8\xD1\x80\xD0\xB0"; // Ошибка загрузки мира
 const char kStReconnecting[] =
-    "\xD0\xA1\xD0\xB2\xD1\x8F\xD0\xB7\xD1\x8C \xD0\xBF\xD0\xBE\xD1\x82\xD0\xB5\xD1\x80\xD1\x8F\xD0\xBD\xD0\xB0, \xD0\xBF\xD0\xB5\xD1\x80\xD0\xB5\xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB5..."; // Связь потеряна, переподключение...
+    "\xD0\x9F\xD0\xBE\xD0\xB2\xD1\x82\xD0\xBE\xD1\x80\xD0\xBD\xD0\xBE\xD0\xB5 \xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB5"; // Повторное подключение
 const char kStFailedHost[] =
     "\xD0\x9D\xD0\xB5 \xD1\x83\xD0\xB4\xD0\xB0\xD0\xBB\xD0\xBE\xD1\x81\xD1\x8C \xD0\xB7\xD0\xB0\xD0\xBF\xD1\x83\xD1\x81\xD1\x82\xD0\xB8\xD1\x82\xD1\x8C \xD1\x81\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD1\x8E"; // Не удалось запустить сессию
 const char kStFailedJoin[] =
@@ -497,8 +499,6 @@ const char kSLoadOrStart[] =
     "\xD0\xB7\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xB8\xD1\x82\xD0\xB5 \xD0\xB8\xD0\xBB\xD0\xB8 \xD0\xBD\xD0\xB0\xD1\x87\xD0\xBD\xD0\xB8\xD1\x82\xD0\xB5 \xD0\xB8\xD0\xB3\xD1\x80\xD1\x83"; // загрузите или начните игру
 const char kSWaitPlayers[] =
     "\xD0\xB6\xD0\xB4\xD1\x91\xD0\xBC \xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD0\xBE\xD0\xB2"; // ждём игроков
-const char kSSending[] =
-    "\xD0\xBE\xD1\x82\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB2\xD0\xBA\xD0\xB0 \xD0\xBC\xD0\xB8\xD1\x80\xD0\xB0 \xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD1\x83"; // отправка мира игроку
 const char kSPlayersFmt[] =
     "\xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xBE: %d"; // подключено: %d
 const char kSNotTracked[] =
@@ -517,8 +517,8 @@ const char kPInGame[] =
     "\xD0\xB2 \xD0\xB8\xD0\xB3\xD1\x80\xD0\xB5"; // в игре
 const char kPNotReady[] =
     "\xD0\xBC\xD0\xB8\xD1\x80 \xD0\xBD\xD0\xB5 \xD0\xB3\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2"; // мир не готов
-const char kPConnected[] =
-    "\xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD1\x91\xD0\xBD"; // подключён
+const char kPUnknown[] =
+    "\xD0\xBC\xD0\xB8\xD1\x80: \xD0\xBD\xD0\xB5\xD0\xB8\xD0\xB7\xD0\xB2\xD0\xB5\xD1\x81\xD1\x82\xD0\xBD\xD0\xBE"; // мир: неизвестно
 const char kNoSession[] =
     "\xD0\x9D\xD0\xB5\xD1\x82 \xD0\xB0\xD0\xBA\xD1\x82\xD0\xB8\xD0\xB2\xD0\xBD\xD0\xBE\xD0\xB9 \xD1\x81\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD0\xB8."; // Нет активной сессии.
 const char kNobodyYet[] =
@@ -539,6 +539,20 @@ const char kErrBrowser[] =
     "\xD0\x9D\xD0\xB5 \xD1\x83\xD0\xB4\xD0\xB0\xD0\xBB\xD0\xBE\xD1\x81\xD1\x8C \xD0\xBE\xD1\x82\xD0\xBA\xD1\x80\xD1\x8B\xD1\x82\xD1\x8C \xD0\xB1\xD1\x80\xD0\xB0\xD1\x83\xD0\xB7\xD0\xB5\xD1\x80."; // Не удалось открыть браузер.
 const char kDiagNone[] =
     "\xD0\x94\xD0\xB8\xD0\xB0\xD0\xB3\xD0\xBD\xD0\xBE\xD1\x81\xD1\x82\xD0\xB8\xD0\xBA\xD0\xB0 \xD0\xBD\xD0\xB5\xD0\xB4\xD0\xBE\xD1\x81\xD1\x82\xD1\x83\xD0\xBF\xD0\xBD\xD0\xB0"; // Диагностика недоступна
+const char kStopTitle[] = "\xD0\x97\xD0\xB0\xD0\xB2\xD0\xB5\xD1\x80\xD1\x88\xD0\xB8\xD1\x82\xD1\x8C \xD1\x81\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD1\x8E?"; // Завершить сессию?
+const char kStopText[] = "\xD0\x92\xD1\x81\xD0\xB5 \xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD1\x91\xD0\xBD\xD0\xBD\xD1\x8B\xD0\xB5 \xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD0\xB8 \xD0\xB1\xD1\x83\xD0\xB4\xD1\x83\xD1\x82 \xD0\xBE\xD1\x82\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD1\x8B."; // Все подключённые игроки будут отключены.
+const char kStopCancel[] = "\xD0\x9E\xD1\x82\xD0\xBC\xD0\xB5\xD0\xBD\xD0\xB0"; // Отмена
+const char kStopConfirm[] = "\xD0\x97\xD0\xB0\xD0\xB2\xD0\xB5\xD1\x80\xD1\x88\xD0\xB8\xD1\x82\xD1\x8C"; // Завершить
+const char kStWorldUnknown[] = "\xD0\x9C\xD0\xB8\xD1\x80 \xD0\xBD\xD0\xB5 \xD0\xBE\xD1\x82\xD1\x81\xD0\xBB\xD0\xB5\xD0\xB6\xD0\xB8\xD0\xB2\xD0\xB0\xD0\xB5\xD1\x82\xD1\x81\xD1\x8F"; // Мир не отслеживается
+const char kStHostGuestsWaiting[] = "\xD0\x9C\xD0\xB8\xD1\x80 \xD0\xB3\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2"; // Мир готов
+const char kNextHostLoad[] = "\xD0\x97\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xB8\xD1\x82\xD0\xB5 \xD1\x81\xD0\xBE\xD1\x85\xD1\x80\xD0\xB0\xD0\xBD\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB5 \xD0\xB8\xD0\xBB\xD0\xB8 \xD0\xBD\xD0\xB0\xD1\x87\xD0\xBD\xD0\xB8\xD1\x82\xD0\xB5 \xD0\xBD\xD0\xBE\xD0\xB2\xD1\x83\xD1\x8E \xD0\xB8\xD0\xB3\xD1\x80\xD1\x83."; // Загрузите сохранение или начните новую игру.
+const char kNextGuests[] = "\xD0\x93\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2\xD0\xBD\xD0\xBE\xD1\x81\xD1\x82\xD1\x8C \xD0\xBC\xD0\xB8\xD1\x80\xD0\xBE\xD0\xB2 \xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD0\xBE\xD0\xB2 \xD0\xBF\xD0\xBE\xD0\xBA\xD0\xB0 \xD0\xBD\xD0\xB5 \xD0\xBF\xD0\xBE\xD0\xB4\xD1\x82\xD0\xB2\xD0\xB5\xD1\x80\xD0\xB6\xD0\xB4\xD0\xB5\xD0\xBD\xD0\xB0."; // Готовность миров игроков пока не подтверждена.
+const char kNextWorldUnknown[] = "\xD0\xA1\xD0\xB5\xD1\x82\xD1\x8C \xD0\xB0\xD0\xBA\xD1\x82\xD0\xB8\xD0\xB2\xD0\xBD\xD0\xB0. \xD0\x93\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2\xD0\xBD\xD0\xBE\xD1\x81\xD1\x82\xD1\x8C \xD0\xBC\xD0\xB8\xD1\x80\xD0\xB0 \xD0\xBD\xD0\xB5 \xD0\xBE\xD1\x82\xD1\x81\xD0\xBB\xD0\xB5\xD0\xB6\xD0\xB8\xD0\xB2\xD0\xB0\xD0\xB5\xD1\x82\xD1\x81\xD1\x8F."; // Сеть активна. Готовность мира не отслеживается.
+const char kNextClientWait[] = "\xD0\x9C\xD0\xB8\xD1\x80 \xD0\xB4\xD0\xBE\xD0\xBB\xD0\xB6\xD0\xB5\xD0\xBD \xD0\xBF\xD0\xBE\xD0\xB4\xD0\xB3\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2\xD0\xB8\xD1\x82\xD1\x8C \xD1\x85\xD0\xBE\xD1\x81\xD1\x82. \xD0\x94\xD0\xBE\xD0\xB6\xD0\xB4\xD0\xB8\xD1\x82\xD0\xB5\xD1\x81\xD1\x8C \xD0\xBF\xD0\xB5\xD1\x80\xD0\xB5\xD0\xB4\xD0\xB0\xD1\x87\xD0\xB8."; // Мир должен подготовить хост. Дождитесь передачи.
+const char kNextClientLoad[] = "\xD0\x94\xD0\xBE\xD0\xB6\xD0\xB4\xD0\xB8\xD1\x82\xD0\xB5\xD1\x81\xD1\x8C \xD0\xB7\xD0\xB0\xD0\xB2\xD0\xB5\xD1\x80\xD1\x88\xD0\xB5\xD0\xBD\xD0\xB8\xD1\x8F \xD0\xB7\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xBA\xD0\xB8 \xD0\xBD\xD0\xB0 \xD1\x8D\xD1\x82\xD0\xBE\xD0\xBC \xD0\xBA\xD0\xBB\xD0\xB8\xD0\xB5\xD0\xBD\xD1\x82\xD0\xB5."; // Дождитесь завершения загрузки на этом клиенте.
+const char kNextPreparing[] = "\xD0\x94\xD0\xBE\xD0\xB6\xD0\xB4\xD0\xB8\xD1\x82\xD0\xB5\xD1\x81\xD1\x8C \xD0\xBF\xD0\xBE\xD0\xB4\xD0\xB3\xD0\xBE\xD1\x82\xD0\xBE\xD0\xB2\xD0\xBA\xD0\xB8 \xD1\x81\xD0\xBE\xD1\x85\xD1\x80\xD0\xB0\xD0\xBD\xD0\xB5\xD0\xBD\xD0\xB8\xD1\x8F \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xBE\xD0\xBC."; // Дождитесь подготовки сохранения хостом.
+const char kNextReceiving[] = "\xD0\x94\xD0\xBE\xD0\xB6\xD0\xB4\xD0\xB8\xD1\x82\xD0\xB5\xD1\x81\xD1\x8C \xD0\xBF\xD0\xBE\xD0\xBB\xD1\x83\xD1\x87\xD0\xB5\xD0\xBD\xD0\xB8\xD1\x8F \xD1\x81\xD0\xBE\xD1\x85\xD1\x80\xD0\xB0\xD0\xBD\xD0\xB5\xD0\xBD\xD0\xB8\xD1\x8F \xD0\xBE\xD1\x82 \xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB0."; // Дождитесь получения сохранения от хоста.
+const char kStopUiFailed[] = "\xD0\x9D\xD0\xB5 \xD1\x83\xD0\xB4\xD0\xB0\xD0\xBB\xD0\xBE\xD1\x81\xD1\x8C \xD0\xBE\xD1\x82\xD0\xBA\xD1\x80\xD1\x8B\xD1\x82\xD1\x8C \xD0\xBF\xD0\xBE\xD0\xB4\xD1\x82\xD0\xB2\xD0\xB5\xD1\x80\xD0\xB6\xD0\xB4\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB5. \xD0\xA1\xD0\xB5\xD1\x81\xD1\x81\xD0\xB8\xD1\x8F \xD0\xBF\xD1\x80\xD0\xBE\xD0\xB4\xD0\xBE\xD0\xBB\xD0\xB6\xD0\xB5\xD0\xBD\xD0\xB0."; // Не удалось открыть подтверждение. Сессия продолжена.
 const char kRepError[] =
     "\xD0\x9E\xD1\x88\xD0\xB8\xD0\xB1\xD0\xBA\xD0\xB0"; // Ошибка
 const char kRepDetail[] =
@@ -766,18 +780,26 @@ MyGUI::Widget* buttonCreateSeh(ForgottenGUI* g, MyGUI::Widget* parent, const std
 // Same configuration the isolated-game probe proved: single-line, editable,
 // not static; native typing, selection and Ctrl+V then just work.
 MyGUI::Widget* editCreateSeh(ForgottenGUI* g, MyGUI::Widget* parent, const std::string* name,
-                             int x, int y, int w, int h, int maxLen) {
+                             int x, int y, int w, int h, int maxLen, bool multiline = false,
+                             const std::string* skin = 0) {
     __try {
-        MyGUI::EditBox* e = g->createEditBoxAbs(parent, y, x, w, h, *name, false);
+        MyGUI::EditBox* e = skin
+            ? g->createEditBoxAbs(parent, y, x, w, h, *name, *skin, multiline)
+            : g->createEditBoxAbs(parent, y, x, w, h, *name, multiline);
         if (!e) return 0;
         e->setCoord(x, y, w, h);
-        e->setEditMultiLine(false);
-        e->setEditReadOnly(false);
+        e->setEditMultiLine(multiline);
+        e->setEditReadOnly(multiline);
         e->setEditStatic(false);
         // Inverting light text makes a selection unreadable on the dark input skin.
         e->setInvertSelected(false);
         e->setMaxTextLength(maxLen);
-        e->setTextAlign(MyGUI::Align::Left | MyGUI::Align::VCenter);
+        e->setTextAlign(MyGUI::Align::Left | (multiline ? MyGUI::Align::Top : MyGUI::Align::VCenter));
+        if (multiline) {
+            e->setEditWordWrap(true);
+            e->setVisibleVScroll(true);
+            e->setVisibleHScroll(false);
+        }
         e->setVisible(false);
         return e;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -878,7 +900,7 @@ int fillLines(Ctl* lines, int n, const std::string& text, int font, const Rgb& c
 struct Selector { Ctl frame, btn, veil; }; // gold frame behind, veil on top when selected
 struct Field    { Ctl ring, edit, button; }; // focus / error ring behind the EditBox
 
-enum { kKvRows = 2, kMsgRows = 3, kStepRows = 3, kPlayerRows = 4, kDiagRowsMax = 24 };
+enum { kKvRows = 2, kMsgRows = 3, kStepRows = 3, kPlayerRows = 4 };
 
 struct PanelWidgets {
     // left
@@ -899,14 +921,12 @@ struct PanelWidgets {
     Ctl      barTrack, barFill, barText, xferLine;
     Ctl      hdrPlayers, playersCount, playersCard, pName[kPlayerRows], pState[kPlayerRows];
     Ctl      updHdr, upd[2];
-    Ctl      diagCard, hdrDiag, diagKey[kDiagRowsMax], diagVal[kDiagRowsMax];
-    int      diagRows;
     // chrome
     Ctl      colRule, footRule, footText, btnDiscord, btnDiag, btnReport, btnHide;
-    PanelWidgets() : msgRows(0), diagRows(0) {}
+    PanelWidgets() : msgRows(0) {}
 };
 
-enum PanelAction { ACT_NONE, ACT_START, ACT_STOP };
+enum PanelAction { ACT_NONE, ACT_START, ACT_STOP, ACT_CONFIRM_STOP };
 
 struct CoopPanelUi {
     DatapanelGUI*  frame;         // the one native outer window
@@ -934,6 +954,23 @@ bool         g_dirty = true;     // refresh on this tick, not at the next 10 Hz 
 std::string  g_selfIdStr;        // own SteamID digits ("" = Steam not up)
 std::string  g_reportText;       // "Copy report" payload, rebuilt each refresh
 
+coopui::StopConfirmation g_stop;
+
+struct AuxWindow {
+    DatapanelGUI* frame;
+    MyGUI::Widget* win;
+    int cw, ch;
+    bool shown;
+    AuxWindow() : frame(0), win(0), cw(0), ch(0), shown(false) {}
+};
+struct AuxiliaryUi {
+    AuxWindow diag, stop;
+    Ctl diagText, stopText[2], cancel, confirm;
+    bool cancelRequested, diagCloseRequested, tabRequested, enterArmed, modalAttached;
+    AuxiliaryUi() : cancelRequested(false), diagCloseRequested(false), tabRequested(false),
+        enterArmed(false), modalAttached(false) {}
+};
+AuxiliaryUi g_aux;
 // Every widget the panel owns, frame window first. POD on purpose: the unlinker
 // may still be called during process teardown, after C++ statics are gone.
 const int      kOwnedMax = 200;
@@ -1220,20 +1257,21 @@ enum NoteSlot { NOTE_NICK, NOTE_EP, NOTE_FOOT, NOTE_COUNT };
 struct PanelNote {
     std::string text;
     int         tone;
-    DWORD       at;
-    PanelNote() : tone(TONE_NORMAL), at(0) {}
+    DWORD       at, ttl;
+    PanelNote() : tone(TONE_NORMAL), at(0), ttl(8000) {}
 };
 PanelNote g_note[NOTE_COUNT];
 const DWORD kNoteMs = 8000;
 
-void setNote(int slot, const char* text, int tone) {
+void setNote(int slot, const char* text, int tone, DWORD ttl = kNoteMs) {
     g_note[slot].text = text;
     g_note[slot].tone = tone;
     g_note[slot].at = GetTickCount();
+    g_note[slot].ttl = ttl;
     g_dirty = true;
 }
 bool noteLive(int slot) {
-    return !g_note[slot].text.empty() && (GetTickCount() - g_note[slot].at) < kNoteMs;
+    return !g_note[slot].text.empty() && (GetTickCount() - g_note[slot].at) < g_note[slot].ttl;
 }
 
 // ---- Widget callbacks ---------------------------------------------------------------
@@ -1263,14 +1301,14 @@ void copySelfId() {
         return;
     }
     bool ok = clipboardSetText(g_selfIdStr.c_str());
-    setNote(NOTE_EP, ok ? ru::kOkCopyId : ru::kErrCopy, ok ? TONE_GOOD : TONE_BAD);
+    setNote(NOTE_EP, ok ? ru::kOkCopyId : ru::kErrCopy, ok ? TONE_GOOD : TONE_BAD, ok ? 2000 : kNoteMs);
     logLine(ok ? "[coop-ui] copied Steam ID to clipboard: ok"
                : "[coop-ui] copied Steam ID to clipboard: FAILED");
 }
 
 void copyReport() {
     bool ok = clipboardSetText(g_reportText.c_str());
-    setNote(NOTE_FOOT, ok ? ru::kOkReport : ru::kErrCopy, ok ? TONE_GOOD : TONE_BAD);
+    setNote(NOTE_FOOT, ok ? ru::kOkReport : ru::kErrCopy, ok ? TONE_GOOD : TONE_BAD, ok ? 2000 : kNoteMs);
     logLine(ok ? "[coop-ui] copied report to clipboard: ok"
                : "[coop-ui] copied report to clipboard: FAILED");
 }
@@ -1280,7 +1318,6 @@ void copyReport() {
 void onPrimary() {
     if (g_locked) {
         g_panel.pendingAction = ACT_STOP;
-        logLine("[coop-ui] connection -> OFFLINE");
     } else {
         g_panel.pendingAction = ACT_START;
         logLine("[coop-ui] connection -> ONLINE");
@@ -1290,6 +1327,13 @@ void onPrimary() {
 void onPanelClick(MyGUI::Widget* w) {
     PanelWidgets& u = g_ui;
     if (!w) return;
+    if (g_stop.open()) {
+        if (w == g_aux.cancel.w) g_aux.cancelRequested = true;
+        else if (w == g_aux.confirm.w && g_aux.confirm.enabled == 1)
+            g_panel.pendingAction = ACT_CONFIRM_STOP;
+        g_dirty = true;
+        return;
+    }
     if (w == u.selHost.btn.w)        selectRole(true);
     else if (w == u.selJoin.btn.w)   selectRole(false);
     else if (w == u.selSteam.btn.w)  selectTransport(true);
@@ -1315,6 +1359,18 @@ void onEditKey(MyGUI::Widget*, MyGUI::KeyCode key, MyGUI::Char) {
 }
 
 void onFrameClose(MyGUI::Window*, const std::string&) { g_panel.closeRequested = true; }
+void onDiagClose(MyGUI::Window*, const std::string&) { g_aux.diagCloseRequested = true; }
+void onStopClose(MyGUI::Window*, const std::string&) { g_aux.cancelRequested = true; }
+void onStopKey(MyGUI::Widget* w, MyGUI::KeyCode key, MyGUI::Char) {
+    if (!g_stop.open()) return;
+    if (key == MyGUI::KeyCode::Escape) g_aux.cancelRequested = true;
+    else if (key == MyGUI::KeyCode::Tab) g_aux.tabRequested = true;
+    else if (key == MyGUI::KeyCode::Return && g_aux.enterArmed) {
+        if (w == g_aux.cancel.w) g_aux.cancelRequested = true;
+        else if (w == g_aux.confirm.w && g_aux.confirm.enabled == 1)
+            g_panel.pendingAction = ACT_CONFIRM_STOP;
+    }
+}
 
 // Paste button: clipboard -> the field, normalised by the field's own parser.
 void runPaste(int f) {
@@ -1387,10 +1443,14 @@ void primaryStatus(const CoopUiSnapshot* st, std::string& text, int& tone) {
         text = host ? ru::kStStartingHost : ru::kStStartingJoin; tone = TONE_BUSY; return;
     case COOP_HOSTING:
         if (st->worldPhase == COOP_WORLD_WAITING) { text = ru::kStHostNoWorld; tone = TONE_BUSY; }
-        else if (st->worldPhase == COOP_WORLD_PREPARING) { text = ru::kStHostSending; tone = TONE_BUSY; }
+        else if (st->worldPhase == COOP_WORLD_PREPARING || st->worldPhase == COOP_WORLD_RECEIVING)
+            { text = ru::kStHostSending; tone = TONE_BUSY; }
         else if (st->worldPhase == COOP_WORLD_LOADING) { text = ru::kStHostLoading; tone = TONE_BUSY; }
-        else if (st->playerCount > 1) { text = ru::kStHostingPlayers; tone = TONE_GOOD; }
-        else { text = ru::kStHostingWait; tone = TONE_BUSY; }
+        else if (st->worldPhase == COOP_WORLD_FAILED) { text = ru::kStConnWorldFailed; tone = TONE_BAD; }
+        else if (coopui::gameReady(*st)) { text = ru::kStHostingPlayers; tone = TONE_GOOD; }
+        else if (st->worldPhase == COOP_WORLD_READY)
+            { text = coopui::hasGuests(*st) ? ru::kStHostGuestsWaiting : ru::kStHostingWait; tone = TONE_BUSY; }
+        else { text = ru::kStWorldUnknown; tone = TONE_MUTED; }
         return;
     case COOP_CONNECTING:
         text = ru::kStConnecting; tone = TONE_BUSY; return;
@@ -1404,7 +1464,7 @@ void primaryStatus(const CoopUiSnapshot* st, std::string& text, int& tone) {
         case COOP_WORLD_LOADING:   text = ru::kStConnLoading;     tone = TONE_BUSY; return;
         case COOP_WORLD_READY:     text = ru::kStConnReady;       tone = TONE_GOOD; return;
         case COOP_WORLD_FAILED:    text = ru::kStConnWorldFailed; tone = TONE_BAD;  return;
-        default:                   text = ru::kStConnected;       tone = TONE_GOOD; return;
+        default:                   text = ru::kStConnected;       tone = TONE_MUTED; return;
         }
     case COOP_RECONNECTING:
         text = ru::kStReconnecting; tone = TONE_BUSY; return;
@@ -1412,6 +1472,19 @@ void primaryStatus(const CoopUiSnapshot* st, std::string& text, int& tone) {
         text = host ? ru::kStFailedHost : ru::kStFailedJoin; tone = TONE_BAD; return;
     default:
         text = ru::kStOffline; tone = TONE_MUTED; return;
+    }
+}
+
+const char* nextAction(const CoopUiSnapshot* st, bool host) {
+    if (st->phase != COOP_HOSTING && st->phase != COOP_CONNECTED) return 0;
+    switch (st->worldPhase) {
+    case COOP_WORLD_WAITING: return host ? ru::kNextHostLoad : ru::kNextClientWait;
+    case COOP_WORLD_PREPARING: return ru::kNextPreparing;
+    case COOP_WORLD_RECEIVING: return host ? ru::kNextPreparing : ru::kNextReceiving;
+    case COOP_WORLD_LOADING: return host ? 0 : ru::kNextClientLoad;
+    case COOP_WORLD_READY: return host && coopui::hasGuests(*st) && !coopui::gameReady(*st) ? ru::kNextGuests : 0;
+    case COOP_WORLD_FAILED: return 0;
+    default: return ru::kNextWorldUnknown;
     }
 }
 
@@ -1463,19 +1536,21 @@ void computeSteps(const CoopUiSnapshot* st, bool host, StepView* s) {
             setStep(s[1], ru::kStepOwnWorld, g_locked ? S_ACTIVE : S_PENDING, ru::kSLoadOrStart); break;
         case COOP_WORLD_LOADING: setStep(s[1], ru::kStepOwnWorld, S_ACTIVE, ru::kSLoading); break;
         case COOP_WORLD_FAILED:  setStep(s[1], ru::kStepOwnWorld, S_FAILED, ru::kSFailed); break;
-        case COOP_WORLD_NONE:    setStep(s[1], ru::kStepOwnWorld, S_PENDING, ru::kSWait); break;
-        default:                 setStep(s[1], ru::kStepOwnWorld, S_DONE, ru::kSDone); break;
+        case COOP_WORLD_PREPARING:
+        case COOP_WORLD_RECEIVING: setStep(s[1], ru::kStepOwnWorld, S_ACTIVE, ru::kSHostPreparing); break;
+        case COOP_WORLD_READY:   setStep(s[1], ru::kStepOwnWorld, S_DONE, ru::kSDone); break;
+        default:                setStep(s[1], ru::kStepOwnWorld, S_MUTED, ru::kSNotTracked); break;
         }
         if (ph == COOP_HOSTING) {
             int others = st->playerCount - 1;
             if (others < 0) others = 0;
             if (wp == COOP_WORLD_PREPARING) {
-                setStep(s[2], ru::kStepPlayers, S_ACTIVE, ru::kSSending);
+                setStep(s[2], ru::kStepPlayers, S_PENDING, ru::kSWait);
             } else if (others > 0) {
                 char b[64];
                 _snprintf(b, sizeof(b) - 1, ru::kSPlayersFmt, others);
                 b[sizeof(b) - 1] = '\0';
-                setStep(s[2], ru::kStepPlayers, S_DONE, b);
+                setStep(s[2], ru::kStepPlayers, coopui::gameReady(*st) ? S_DONE : S_ACTIVE, b);
             } else {
                 setStep(s[2], ru::kStepPlayers, S_ACTIVE, ru::kSWaitPlayers);
             }
@@ -1537,7 +1612,7 @@ const Rgb& stepTextRgb(int state) {
 void worldStatus(const CoopUiSnapshot* st, bool host, std::string& text) {
     switch (st->worldPhase) {
     case COOP_WORLD_WAITING:   text = host ? ru::kSLoadOrStart : ru::kSWaitHost; return;
-    case COOP_WORLD_PREPARING: text = host ? ru::kSSending : ru::kSHostPreparing; return;
+    case COOP_WORLD_PREPARING: text = ru::kSHostPreparing; return;
     case COOP_WORLD_RECEIVING: text = ru::kSReceiving; return;
     case COOP_WORLD_LOADING:   text = ru::kSLoading; return;
     case COOP_WORLD_READY:     text = ru::kSDone; return;
@@ -1553,7 +1628,7 @@ std::string boundedName(const char* s, size_t cap) {
 }
 
 // "name (you, host)" + readiness for roster row i. Readiness is only claimed
-// when the plugin knows it; otherwise a member is merely "connected".
+// when the plugin knows it; otherwise the world's readiness stays unknown.
 void playerRow(const CoopUiPlayer& p, std::string& who, std::string& state, int& tone) {
     who = boundedName(p.name, sizeof(p.name));
     if (who.empty()) {
@@ -1574,7 +1649,7 @@ void playerRow(const CoopUiPlayer& p, std::string& who, std::string& state, int&
         state = p.worldReady ? ru::kPInGame : ru::kPNotReady;
         tone = p.worldReady ? TONE_GOOD : TONE_BUSY;
     } else {
-        state = ru::kPConnected;
+        state = ru::kPUnknown;
         tone = TONE_NORMAL;
     }
 }
@@ -1860,7 +1935,6 @@ bool buildPanelWidgets(ForgottenGUI* g, MyGUI::Widget* parent, int cw, int ch) {
     u.msgRows = msgRows;
     yr += stateH + gapR;
 
-    const int diagTop = yr;
     const int half = rw / 2;
     mkLabel(b, u.hdrSteps, F_HEAD, rx, yr, rw, kHeadH);
     yr += head;
@@ -1885,30 +1959,16 @@ bool buildPanelWidgets(ForgottenGUI* g, MyGUI::Widget* parent, int cw, int ch) {
     int pcH = updTop - gapR - yr;
     if (pcH < playersMin) pcH = playersMin;
     mkRect(b, u.playersCard, rx, yr, rw, pcH, C_BLACK, 0.30f);
-    const int nameW = rw * 58 / 100;
+    const int nameW = rw * 52 / 100;
     for (int i = 0; i < kPlayerRows; ++i) {
         const int py = yr + 6 + i * 23;
-        mkLabel(b, u.pName[i], F_BODY, rx + 14, py, nameW - 14, 23);
-        mkLabel(b, u.pState[i], F_SMALL, rx + nameW, py, rw - nameW - 14, 23);
+        mkLabel(b, u.pName[i], F_BODY, rx + 14, py, nameW - 22, 23);
+        mkLabel(b, u.pState[i], F_BODY, rx + nameW + 8, py, rw - nameW - 22, 23);
     }
-    const int diagBottom = yr + pcH;
     mkLabel(b, u.updHdr, F_SMALL, rx, updTop, rw, kNoteH);
     mkLabel(b, u.upd[0], F_SMALL, rx, updTop + kNoteH, rw, kNoteH);
     mkLabel(b, u.upd[1], F_SMALL, rx, updTop + 2 * kNoteH, rw, kNoteH);
 
-    // Folded diagnostics: the milestones + roster region, while unfolded.
-    mkLabel(b, u.hdrDiag, F_HEAD, rx, diagTop, rw, kHeadH);
-    const int dcTop = diagTop + head;
-    const int dcH = diagBottom - dcTop;
-    mkRect(b, u.diagCard, rx, dcTop, rw, dcH, C_BLACK, 0.30f);
-    const int rows = clampi((dcH - 12) / kNoteH, 1, kDiagRowsMax);
-    const int valX = rw * 45 / 100;
-    for (int i = 0; i < rows; ++i) {
-        const int dy = dcTop + 6 + i * kNoteH;
-        mkLabel(b, u.diagKey[i], F_SMALL, rx + 14, dy, rw - 28, kNoteH);
-        mkLabel(b, u.diagVal[i], F_SMALL, rx + valX, dy, rw - valX - 14, kNoteH);
-    }
-    u.diagRows = rows;
 
     // Footer.
     const int fbH = 36;
@@ -2003,12 +2063,224 @@ bool openPanelWindows(ForgottenGUI* g) {
     return true;
 }
 
+bool windowMovableSeh(MyGUI::Widget* w, bool movable) {
+    __try { static_cast<MyGUI::Window*>(w)->setMovable(movable); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+int absoluteLeftSeh(MyGUI::Widget* w) {
+    __try { return w->getAbsoluteLeft(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+bool modalSeh(MyGUI::Widget* w, bool attach) {
+    __try {
+        MyGUI::InputManager* im = MyGUI::InputManager::getInstancePtr();
+        if (!im) return false;
+        if (attach) im->addWidgetModal(w); else im->removeWidgetModal(w);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool scrollTextSeh(MyGUI::Widget* w, size_t maxLength, size_t* scroll, bool restore) {
+    __try {
+        MyGUI::EditBox* e = static_cast<MyGUI::EditBox*>(w);
+        if (restore) e->setVScrollPosition(*scroll);
+        else { *scroll = e->getVScrollPosition(); e->setMaxTextLength(maxLength); }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+bool makeAuxWindow(ForgottenGUI* g, AuxWindow& a, const char* title,
+                   int x, int y, int width, int height) {
+    // Auxiliary windows must remain above the main Info-layer panel when it
+    // regains focus. Kenshi's existing Top layer is interactive, not a modal.
+    const std::string layer = "Top";
+    DatapanelGUI* f = g->createDatapanel(kFrameA, kFrameB, kFrameW, kFrameH, false, layer, true);
+    if (!f) return false;
+    MyGUI::Widget* win = frameWinSeh(f);
+    MyGUI::Widget* parent = 0;
+    int cw = 0, ch = 0;
+    if (!win || !coordSeh(win, x, y, width, height) ||
+        !frameClientSeh(f, &parent, &cw, &ch) || cw < 200 || ch < 100) {
+        panelDestroySeh(g, f);
+        return false;
+    }
+    const std::string caption = title;
+    frameCaptionSeh(f, &caption);
+    frameFont(f);
+    windowMovableSeh(win, true);
+    panelShowSeh(f, false);
+    a.frame = f; a.win = win; a.cw = cw; a.ch = ch;
+    track(win);
+    return true;
+}
+
+bool buildDiagnostics(ForgottenGUI* g) {
+    int vw = 0, vh = 0;
+    if (!parentSizeSeh(g_panel.win, &vw, &vh)) return false;
+    const int width = clampi(absoluteLeftSeh(g_ui.hdrState.w) - 40, 0, 520);
+    if (width < 240) return false;
+    const int ownedBefore = g_ownedN;
+    if (!makeAuxWindow(g, g_aux.diag, ru::kHdrDiag, 20, 60, width, clampi(vh - 100, 240, 520)))
+        return false;
+    Builder b = { g, g_aux.diag.win, 0 };
+    const std::string name = nextName();
+    // The empty stretch template uses SimpleText: its scrollbar moves without
+    // moving text. Kenshi_WordWrap has an EditText client and native VScroll.
+    const std::string skin = "Kenshi_WordWrap";
+    const int w = g_aux.diag.cw - 2 * kPad, h = g_aux.diag.ch - 2 * kPad;
+    place(b, g_aux.diagText, editCreateSeh(g, b.parent, &name, kPad, kPad, w, h, 1, true, &skin),
+          K_EDIT, F_SMALL, kPad, kPad, w, h);
+    if (b.failed || !frameCloseHookSeh(g_aux.diag.frame, MyGUI::newDelegate(&onDiagClose))) {
+        g_ownedN = ownedBefore;
+        panelDestroySeh(g, g_aux.diag.frame);
+        g_aux.diag = AuxWindow(); g_aux.diagText = Ctl();
+        return false;
+    }
+    const MyGUI::Colour tint(C_FIELD_TINT.r, C_FIELD_TINT.g, C_FIELD_TINT.b, 1.0f);
+    fillSeh(g_aux.diagText.w, &tint, 1.0f);
+    ctlColour(g_aux.diagText, C_TEXT);
+    ctlReadOnly(g_aux.diagText, true);
+    ctlVisible(g_aux.diagText, true);
+    return true;
+}
+
+bool buildStopDialog(ForgottenGUI* g) {
+    int vw = 0, vh = 0;
+    if (!parentSizeSeh(g_panel.win, &vw, &vh)) return false;
+    const int width = clampi(vw - 40, 320, 580), height = 220;
+    const int ownedBefore = g_ownedN;
+    if (!makeAuxWindow(g, g_aux.stop, ru::kStopTitle, (vw - width) / 2, (vh - height) / 2, width, height))
+        return false;
+    Builder b = { g, g_aux.stop.win, 0 };
+    const int w = g_aux.stop.cw, h = g_aux.stop.ch, gap = 16;
+    for (int i = 0; i < 2; ++i)
+        mkLabel(b, g_aux.stopText[i], F_BODY, kPad, 12 + i * 26, w - 2 * kPad, 26);
+    const int bw = (w - 2 * kPad - gap) / 2;
+    mkButton(b, g_aux.cancel, F_BODY, kPad, h - 62, bw, 44);
+    mkButton(b, g_aux.confirm, F_BODY, kPad + bw + gap, h - 62, bw, 44);
+    if (b.failed || !frameCloseHookSeh(g_aux.stop.frame, MyGUI::newDelegate(&onStopClose))) {
+        g_ownedN = ownedBefore;
+        panelDestroySeh(g, g_aux.stop.frame);
+        g_aux.stop = AuxWindow(); g_aux.cancel = Ctl(); g_aux.confirm = Ctl();
+        for (int i = 0; i < 2; ++i) g_aux.stopText[i] = Ctl();
+        return false;
+    }
+    fillLines(g_aux.stopText, 2, ru::kStopText, F_BODY, C_TEXT);
+    ctlText(g_aux.cancel, ru::kStopCancel); ctlVisible(g_aux.cancel, true); ctlEnabled(g_aux.cancel, true);
+    ctlText(g_aux.confirm, ru::kStopConfirm); ctlVisible(g_aux.confirm, true); ctlEnabled(g_aux.confirm, false);
+    g_aux.cancel.w->eventKeyButtonPressed += MyGUI::newDelegate(&onStopKey);
+    g_aux.confirm.w->eventKeyButtonPressed += MyGUI::newDelegate(&onStopKey);
+    return true;
+}
+
+void closeStopWindow() {
+    if (g_aux.modalAttached) {
+        modalSeh(g_aux.stop.win, false);
+        g_aux.modalAttached = false;
+    }
+    coopui::native::releaseFocus(g_aux.stop.win);
+    panelShowSeh(g_aux.stop.frame, false);
+    g_aux.stop.shown = false;
+    g_aux.cancelRequested = g_aux.tabRequested = g_aux.enterArmed = false;
+}
+void hideAuxiliary() {
+    g_stop.cancel();
+    closeStopWindow();
+    coopui::native::releaseFocus(g_aux.diag.win);
+    panelShowSeh(g_aux.diag.frame, false);
+    g_aux.diag.shown = false;
+}
+
+void syncAuxiliary(ForgottenGUI* g) {
+    if (g_stop.open()) {
+        if (!g_aux.stop.frame && !buildStopDialog(g)) {
+            g_stop.cancel();
+            setNote(NOTE_FOOT, ru::kStopUiFailed, TONE_BAD);
+            logErrLine("[coop-ui] stop confirmation build FAILED; session unchanged");
+        } else if (!g_aux.stop.shown) {
+            panelShowSeh(g_aux.stop.frame, true);
+            g_aux.modalAttached = modalSeh(g_aux.stop.win, true);
+            if (!g_aux.modalAttached || !coopui::native::focus(g_aux.cancel.w)) {
+                g_stop.cancel(); closeStopWindow();
+                setNote(NOTE_FOOT, ru::kStopUiFailed, TONE_BAD);
+            } else {
+                g_aux.stop.shown = true;
+                g_aux.enterArmed = false;
+                g_dirty = true;
+            }
+        }
+        if (g_stop.open()) {
+            if (!(GetAsyncKeyState(VK_RETURN) & 0x8000)) g_aux.enterArmed = true;
+            ctlEnabled(g_aux.confirm, g_aux.enterArmed);
+            ctlButtonColour(g_aux.cancel, C_SOFT, C_HOVER);
+            ctlButtonColour(g_aux.confirm, g_aux.enterArmed ? C_GOLD : C_DIM, C_HOVER);
+            if (g_aux.tabRequested) {
+                g_aux.tabRequested = false;
+                coopui::native::focus(coopui::native::focusWidget() == g_aux.cancel.w ? g_aux.confirm.w : g_aux.cancel.w);
+            }
+        }
+    } else if (g_aux.stop.shown) closeStopWindow();
+
+    if (g_panel.diagOpen) {
+        if (!g_aux.diag.frame && !buildDiagnostics(g)) {
+            g_panel.diagOpen = false;
+            setNote(NOTE_FOOT, ru::kDiagNone, TONE_BAD);
+        } else if (!g_aux.diag.shown) {
+            panelShowSeh(g_aux.diag.frame, true);
+            g_aux.diag.shown = true;
+            g_dirty = true;
+        }
+    } else if (g_aux.diag.shown) {
+        coopui::native::releaseFocus(g_aux.diag.win);
+        panelShowSeh(g_aux.diag.frame, false);
+        g_aux.diag.shown = false;
+    }
+}
+
+void refreshDiagnostic(const CoopUiSnapshot* st, const std::string& raw) {
+    Ctl& c = g_aux.diagText;
+    if (!g_panel.diagOpen || !c.w) return;
+    std::string text = raw.empty() ? ru::kDiagNone : coopui::redact(raw, *st, false);
+    if (!raw.empty()) {
+        std::string labels[2];
+        int tone = TONE_MUTED;
+        linkStatus(st, labels[0], tone);
+        worldStatus(st, st->isHost != 0, labels[1]);
+        if (st->worldPhase == COOP_WORLD_NONE) labels[1] = ru::kSNotTracked;
+        const char* keys[2] = {
+            "\xD0\xA4\xD0\xB0\xD0\xB7\xD0\xB0 \xD1\x81\xD0\xB5\xD1\x82\xD0\xB8: ", // Фаза сети:
+            "\xD0\xA4\xD0\xB0\xD0\xB7\xD0\xB0 \xD0\xBC\xD0\xB8\xD1\x80\xD0\xB0: " // Фаза мира:
+        };
+        for (int i = 0; i < 2; ++i) {
+            const size_t at = text.find(keys[i]);
+            if (at == std::string::npos || (at && text[at - 1] != '\n')) continue;
+            const size_t begin = at + std::strlen(keys[i]);
+            size_t end = text.find_first_of(", \r\n", begin);
+            if (end == std::string::npos) end = text.size();
+            std::string value = labels[i];
+            value.reserve(value.size() + end - begin + 3);
+            value += " ("; value.append(text, begin, end - begin); value += ')';
+            text.replace(begin, end - begin, value);
+        }
+    }
+    if (c.textSet && c.text == text) return;
+    size_t scroll = 0;
+    if (!scrollTextSeh(c.w, text.size() + 1, &scroll, false)) return;
+    if (!coopui::native::write(static_cast<MyGUI::EditBox*>(c.w), text.c_str())) return;
+    c.text = text;
+    c.textSet = true;
+    scrollTextSeh(c.w, 0, &scroll, true);
+}
+
 // The GUI destroyed the window (or was replaced): drop every pointer unseen.
 void forgetPanel(const char* why) {
     // The GUI owns the panel list; the old frame may already have been freed.
     // Only drop our focus, without dereferencing the obsolete root pointer.
     coopui::native::releaseFocus(g_panel.win);
+    coopui::native::releaseFocus(g_aux.diag.win);
+    coopui::native::releaseFocus(g_aux.stop.win);
     coopui::native::guardGameInput(false);
+    g_stop.cancel();
+    g_aux = AuxiliaryUi(); // GUI reset invalidated every auxiliary pointer as well.
     g_ownedN = 0;
     g_ui = PanelWidgets();
     g_panel.frame = 0;
@@ -2034,6 +2306,7 @@ void hidePanel() {
         coopui::native::releaseFocus(g_panel.win);
         commitDrafts(true);
     }
+    hideAuxiliary();
     coopui::native::guardGameInput(false);
     g_pendingPaste = -1;
     g_tabDir = 0;
@@ -2189,13 +2462,15 @@ void appendReportLine(std::string& rep, const char* key, const std::string& valu
 void refreshRight(const CoopUiSnapshot* st, std::string& report) {
     PanelWidgets& u = g_ui;
     const bool host = sessionRoleHost(st);
-    const bool diag = g_panel.diagOpen;
 
     std::string status;
     int statusTone = TONE_NORMAL;
     primaryStatus(st, status, statusTone);
-    const std::string detail = st->detail ? std::string(st->detail) : std::string();
-    const std::string error = st->errorDetail ? std::string(st->errorDetail) : std::string();
+    const std::string rawDetail = st->detail ? st->detail : "";
+    const std::string rawError = st->errorDetail ? st->errorDetail : "";
+    const char* next = nextAction(st, host);
+    const std::string detail = next ? next : coopui::redact(rawDetail, *st, false);
+    const std::string error = coopui::redact(rawError, *st, false);
     std::string link;
     int linkTone = TONE_MUTED;
     linkStatus(st, link, linkTone);
@@ -2219,15 +2494,15 @@ void refreshRight(const CoopUiSnapshot* st, std::string& report) {
     // Milestones.
     StepView steps[kStepRows];
     computeSteps(st, host, steps);
-    heading(u.hdrSteps, host ? ru::kHdrStepsHost : ru::kHdrStepsJoin, !diag);
-    ctlVisible(u.stepsCard, !diag);
+    heading(u.hdrSteps, host ? ru::kHdrStepsHost : ru::kHdrStepsJoin, true);
+    ctlVisible(u.stepsCard, true);
     for (int i = 0; i < kStepRows; ++i) {
         const int s = steps[i].state;
         ctlFill(u.stepDot[i], stepDotRgb(s), 1.0f);
-        ctlVisible(u.stepDot[i], !diag);
+        ctlVisible(u.stepDot[i], true);
         lineIf(u.stepName[i], steps[i].name, (s == S_PENDING || s == S_MUTED) ? C_MUTED : C_TEXT,
-               !diag);
-        lineIf(u.stepVal[i], steps[i].value, stepTextRgb(s), !diag);
+               true);
+        lineIf(u.stepVal[i], steps[i].value, stepTextRgb(s), true);
     }
     std::string transfer;
     bool bar = false;
@@ -2243,110 +2518,77 @@ void refreshRight(const CoopUiSnapshot* st, std::string& report) {
         transfer = b;
         bar = true;
     } else if (st->transferDetail && st->transferDetail[0]) {
-        transfer = st->transferDetail;
+        transfer = coopui::redact(st->transferDetail, *st, false);
     }
-    ctlVisible(u.barTrack, !diag && bar);
+    ctlVisible(u.barTrack, bar);
     if (bar && u.barTrack.w) {
         int fw = (int)(u.barTrack.cw * frac);
         if (fw < 2) fw = 2;
         ctlCoord(u.barFill, u.barTrack.x, u.barTrack.y, fw, u.barTrack.ch);
     }
-    ctlVisible(u.barFill, !diag && bar);
-    lineIf(u.barText, bar ? transfer : std::string(), C_BUSY, !diag);
-    lineIf(u.xferLine, bar ? std::string() : transfer, C_BUSY, !diag);
+    ctlVisible(u.barFill, bar);
+    lineIf(u.barText, bar ? transfer : std::string(), C_BUSY, true);
+    lineIf(u.xferLine, bar ? std::string() : transfer, C_BUSY, true);
 
     // Roster: accepted members only (plugin truth), never a config id list.
     int count = st->playerCount;
     if (count < 0) count = 0;
     if (count > kPlayerRows) count = kPlayerRows;
     std::string rosterReport;
-    heading(u.hdrPlayers, ru::kHdrPlayers, !diag);
+    heading(u.hdrPlayers, ru::kHdrPlayers, true);
     char c[16];
     _snprintf(c, sizeof(c) - 1, "%d / 4", count);
     c[sizeof(c) - 1] = '\0';
     lineIf(u.playersCount, g_locked ? std::string(c) : std::string("-"),
-           g_locked ? C_TEXT : C_MUTED, !diag);
-    ctlVisible(u.playersCard, !diag);
+           g_locked ? C_TEXT : C_MUTED, true);
+    ctlVisible(u.playersCard, true);
     int row = 0;
     if (g_locked) {
         for (; row < count; ++row) {
             std::string who, state;
             int tone = TONE_NORMAL;
             playerRow(st->players[row], who, state, tone);
-            lineIf(u.pName[row], who, C_TEXT, !diag);
-            lineIf(u.pState[row], state, toneRgb(tone), !diag);
+            who = coopui::redact(who, *st, false);
+            const size_t cols = colsFor(u.pName[row].cw, F_BODY);
+            const std::string visibleName = utf8Count(who) > cols ? who.substr(0, utf8Prefix(who, cols - 3)) + "..." : who;
+            lineIf(u.pName[row], visibleName, C_TEXT, true);
+            lineIf(u.pState[row], state, toneRgb(tone), true);
             if (!rosterReport.empty()) rosterReport += ", ";
-            rosterReport += who + " - " + state;
+            rosterReport += coopui::privacy::alias(st->players[row].id) + " - " + state;
         }
     }
     const char* rosterNote = !g_locked ? ru::kNoSession
                            : (st->isHost && count <= 1) ? ru::kNobodyYet : 0;
     if (row < kPlayerRows) {
         hideLines(u.pState + row, kPlayerRows - row);
-        if (rosterNote && !diag)
+        if (rosterNote)
             fillLines(u.pName + row, kPlayerRows - row, rosterNote, F_BODY, C_MUTED);
         else
             hideLines(u.pName + row, kPlayerRows - row);
     }
 
     // The mod updater is not the connection: its own secondary section.
-    const std::string update = st->updateDetail ? std::string(st->updateDetail) : std::string();
+    const std::string rawUpdate = st->updateDetail ? st->updateDetail : "";
+    const std::string update = coopui::redact(rawUpdate, *st, false);
     heading(u.updHdr, ru::kHdrUpdate, !update.empty());
     if (update.empty()) hideLines(u.upd, 2);
     else fillLines(u.upd, 2, update, F_SMALL, C_BUSY);
 
-    // Diagnostics (rates and internals live only here and in the report).
-    const std::string diagText =
-        st->diagnosticsDetail ? std::string(st->diagnosticsDetail) : std::string();
-    heading(u.hdrDiag, ru::kHdrDiag, diag);
-    ctlVisible(u.diagCard, diag);
-    int dn = 0;
-    if (diag) {
-        if (diagText.empty()) {
-            lineIf(u.diagKey[0], ru::kDiagNone, C_MUTED, true);
-            ctlVisible(u.diagVal[0], false);
-            dn = 1;
-        } else {
-            size_t start = 0;
-            while (start < diagText.size() && dn < u.diagRows) {
-                size_t nl = diagText.find('\n', start);
-                if (nl == std::string::npos) nl = diagText.size();
-                std::string line = diagText.substr(start, nl - start);
-                start = nl + 1;
-                size_t cr = line.find('\r');
-                if (cr != std::string::npos) line.erase(cr);
-                if (line.empty()) continue;
-                const size_t colon = line.find(": ");
-                if (colon != std::string::npos) {
-                    lineIf(u.diagKey[dn], line.substr(0, colon), C_MUTED, true);
-                    lineIf(u.diagVal[dn], line.substr(colon + 2), C_TEXT, true);
-                } else {
-                    lineIf(u.diagKey[dn], line, C_MUTED, true);
-                    ctlVisible(u.diagVal[dn], false);
-                }
-                ++dn;
-            }
-            if (start < diagText.size() && dn > 0) {
-                lineIf(u.diagKey[dn - 1], "...", C_BUSY, true);
-                lineIf(u.diagVal[dn - 1], ru::kCopyReport, C_BUSY, true);
-            }
-        }
-    }
-    hideLines(u.diagKey + dn, u.diagRows - dn);
-    hideLines(u.diagVal + dn, u.diagRows - dn);
+    // The independent window scrolls the entire diagnostic payload.
+    const std::string diagText = st->diagnosticsDetail ? st->diagnosticsDetail : "";
+    refreshDiagnostic(st, diagText);
 
-    // Plain-text report for "Copy report": what the panel shows plus the raw
-    // diagnostics, so a pasted report needs no screenshot.
+    // Diagnostic export is anonymous; explicit endpoint sharing is separate.
     std::string world;
     worldStatus(st, host, world);
     report.clear();
     report += "KenshiCoop ";
-    report += (st->versionText && st->versionText[0]) ? st->versionText : "-";
+    report += (st->versionText && st->versionText[0]) ? coopui::redact(st->versionText, *st, true) : "-";
     report += "\r\n";
     appendReportLine(report, ru::kRowRole, role);
     appendReportLine(report, ru::kRepState, status);
-    appendReportLine(report, ru::kRepDetail, detail);
-    appendReportLine(report, ru::kRepError, error);
+    appendReportLine(report, ru::kRepDetail, next ? next : coopui::redact(rawDetail, *st, true));
+    appendReportLine(report, ru::kRepError, coopui::redact(rawError, *st, true));
     appendReportLine(report, ru::kRowLink, link);
     std::string stepsReport;
     for (int i = 0; i < kStepRows; ++i) {
@@ -2357,9 +2599,10 @@ void refreshRight(const CoopUiSnapshot* st, std::string& report) {
     }
     appendReportLine(report, ru::kRepSteps, stepsReport);
     appendReportLine(report, host ? ru::kRepWorldOwn : ru::kRepWorldHost, world);
-    if (!transfer.empty()) appendReportLine(report, ru::kSReceiving, transfer);
+    if (!transfer.empty()) appendReportLine(report, ru::kSReceiving,
+        st->totalBytes > 0 ? transfer : coopui::redact(st->transferDetail ? st->transferDetail : "", *st, true));
     appendReportLine(report, ru::kRepPlayers, rosterReport);
-    if (!update.empty()) report += std::string(ru::kUpdate) + update + "\r\n";
+    if (!update.empty()) report += std::string(ru::kUpdate) + coopui::redact(rawUpdate, *st, true) + "\r\n";
     report += "--- ";
     report += ru::kRepDiag;
     report += " ---\r\n";
@@ -2367,9 +2610,10 @@ void refreshRight(const CoopUiSnapshot* st, std::string& report) {
         report += ru::kDiagNone;
         report += "\r\n";
     } else {
-        for (size_t i = 0; i < diagText.size(); ++i) {
-            if (diagText[i] == '\n' && (i == 0 || diagText[i - 1] != '\r')) report += '\r';
-            report += diagText[i];
+        const std::string anonymous = coopui::redact(diagText, *st, true);
+        for (size_t i = 0; i < anonymous.size(); ++i) {
+            if (anonymous[i] == '\n' && (i == 0 || anonymous[i - 1] != '\r')) report += '\r';
+            report += anonymous[i];
         }
         report += "\r\n";
     }
@@ -2383,7 +2627,7 @@ void refreshFooter(const CoopUiSnapshot* st) {
         lineIf(u.footText, g_note[NOTE_FOOT].text, toneRgb(g_note[NOTE_FOOT].tone), true);
     } else {
         std::string foot = "KenshiCoop ";
-        foot += (st->versionText && st->versionText[0]) ? st->versionText : "-";
+        foot += (st->versionText && st->versionText[0]) ? coopui::redact(st->versionText, *st, false) : "-";
         foot += "   |   ";
         foot += ru::kTitleHint;
         lineIf(u.footText, foot, C_MUTED, true);
@@ -2504,9 +2748,18 @@ void emitCommand(CoopUiCommand* cmd) {
         }
         return;
     }
-    if (act == ACT_STOP && g_locked) {
-        logLine("[coop-ui] DISCONNECT requested");
-        if (cmd) cmd->kind = COOP_UI_DISCONNECT;
+    if ((act == ACT_STOP || act == ACT_CONFIRM_STOP) && g_locked) {
+        if (!cmd) { g_stop.cancel(); return; }
+        bool disconnect = false;
+        if (act == ACT_CONFIRM_STOP) disconnect = g_stop.confirm();
+        else disconnect = g_stop.request() == coopui::StopConfirmation::DISCONNECT;
+        if (disconnect) {
+            closeStopWindow();
+            logLine("[coop-ui] connection -> OFFLINE");
+            logLine("[coop-ui] DISCONNECT requested");
+            cmd->kind = COOP_UI_DISCONNECT;
+        }
+        g_dirty = true;
         return;
     }
     if (g_rememberPending && cmd) {
@@ -2538,12 +2791,44 @@ void panelTick(const CoopUiSnapshot* st, CoopUiCommand* cmd) {
         g_panel.steamFlag = (st->transportSel == 0);
     }
 
+    // Desktop-global hotkeys belong only to the foreground game.
+    static const DWORD processId = GetCurrentProcessId();
+    DWORD foregroundProcess = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &foregroundProcess);
+    const bool active = foregroundProcess == processId;
+    const bool f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
+    const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    const bool f2Press = active && f2 && !g_panel.f2Down;
+    const bool escPress = active && esc && !g_panel.escDown;
+    g_panel.f2Down = f2;
+    g_panel.escDown = esc;
+    const bool hadDialog = g_stop.open();
+    g_stop.observe(*st);
+    if (hadDialog && !g_stop.open()) {
+        g_panel.pendingAction = ACT_NONE;
+        g_dirty = true;
+    }
+    const bool escHandled = escPress && (hadDialog || g_aux.stop.shown);
+    const bool mainHidden = g_panel.frame && g_panel.seenVisible && frameVisibleSeh(g_panel.frame) == 0;
+    const bool dialogHidden = g_aux.stop.shown && frameVisibleSeh(g_aux.stop.frame) == 0;
+    if (g_aux.cancelRequested || escHandled || dialogHidden ||
+        ((f2Press || g_panel.closeRequested || mainHidden) && (hadDialog || g_aux.stop.shown))) {
+        g_stop.cancel();
+        closeStopWindow();
+        g_panel.pendingAction = ACT_NONE;
+        g_dirty = true;
+    }
+    if (g_aux.diagCloseRequested) {
+        g_aux.diagCloseRequested = false;
+        g_panel.diagOpen = false;
+        g_dirty = true;
+    }
     // Enter in a field: a start, and only from idle (never a disconnect).
     if (g_enterPressed) {
         g_enterPressed = false;
         if (!g_locked && g_panel.open && g_panel.built) g_panel.pendingAction = ACT_START;
     }
-    // Queued Start/Stop first, so "Hide" pressed in the same frame cannot drop it.
+    // Cancellation and snapshot invalidation precede a queued confirmation.
     emitCommand(cmd);
     if (g_pendingDiscord) {
         g_pendingDiscord = false;
@@ -2562,25 +2847,13 @@ void panelTick(const CoopUiSnapshot* st, CoopUiCommand* cmd) {
 
     g_selfIdStr = st->selfSteamId ? decimal(st->selfSteamId) : std::string();
 
-    // F2 toggles; Esc, the close button and "Hide" only close. Never a disconnect.
-    // GetAsyncKeyState is desktop-global: only the foreground game handles the press.
-    static const DWORD processId = GetCurrentProcessId();
-    DWORD foregroundProcess = 0;
-    GetWindowThreadProcessId(GetForegroundWindow(), &foregroundProcess);
-    const bool active = foregroundProcess == processId;
-    const bool f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
-    const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-    const bool f2Press = active && f2 && !g_panel.f2Down;
-    const bool escPress = active && esc && !g_panel.escDown;
-    g_panel.f2Down = f2;
-    g_panel.escDown = esc;
     bool hiddenByEngine = false;
     if (g_panel.open && g_panel.frame) {
         const int vis = frameVisibleSeh(g_panel.frame);
         if (vis == 1) g_panel.seenVisible = true;
         else if (vis == 0 && g_panel.seenVisible) hiddenByEngine = true;
     }
-    if (g_panel.open && (f2Press || escPress || g_panel.closeRequested || hiddenByEngine)) {
+    if (g_panel.open && (f2Press || (escPress && !escHandled) || g_panel.closeRequested || hiddenByEngine)) {
         hidePanel();
     } else if (!g_panel.open && f2Press) {
         if (!g_locked) {
@@ -2604,6 +2877,7 @@ void panelTick(const CoopUiSnapshot* st, CoopUiCommand* cmd) {
     }
 
     g_mouseFocus = mouseFocusSeh();
+    syncAuxiliary(g);
     if (g_pendingPaste >= 0) {
         const int f = g_pendingPaste;
         g_pendingPaste = -1;
@@ -2636,7 +2910,8 @@ void panelTick(const CoopUiSnapshot* st, CoopUiCommand* cmd) {
         if (e.visible == 1 && e.readOnly != 1) editing = true;
         else coopui::native::releaseFocus(e.w);
     }
-    coopui::native::guardGameInput(editing);
+    const bool diagFocused = g_panel.diagOpen && coopui::native::focusWidget() == g_aux.diagText.w;
+    coopui::native::guardGameInput(editing || g_stop.open() || diagFocused);
 }
 
 // ---- Persistent co-op connection banner ------------------------------------------
@@ -2779,17 +3054,14 @@ void overlayTick(const char* text, int state, bool show) {
     }
 }
 
-// Banner: red = offline/failed, green = a real session (host with an admitted
-// join, or a join past WELCOME), yellow = everything in between. A failed start
-// stays visible (red) until the next Connect/Disconnect.
+// Banner uses the same truthful world summary as the panel, not raw core text.
 void bannerTick(const CoopUiSnapshot* st) {
-    int state = 1;
-    if (st->phase == COOP_OFFLINE || st->phase == COOP_FAILED)
-        state = 0;
-    else if ((st->phase == COOP_HOSTING && st->playerCount > 1) ||
-             st->phase == COOP_CONNECTED)
-        state = 2;
-    overlayTick(st->detail, state, st->running || st->phase == COOP_FAILED);
+    std::string text;
+    int tone = TONE_MUTED;
+    primaryStatus(st, text, tone);
+    const int state = tone == TONE_GOOD ? 2 :
+        (st->phase == COOP_FAILED || st->phase == COOP_OFFLINE || tone == TONE_BAD) ? 0 : 1;
+    overlayTick(text.c_str(), state, st->running || st->phase == COOP_FAILED);
 }
 
 // ---- C ABI -------------------------------------------------------------------------
@@ -2835,6 +3107,7 @@ void COOP_UI_CALL apiShutdown(void) {
     // Give the keyboard back first: focus in a panel field, then the game-input
     // lease (both no-ops when not held). A lost panel is not touched.
     if (g_panel.built && !g_panelLost) coopui::native::releaseFocus(g_panel.win);
+    if (!g_panelLost) hideAuxiliary(); else g_stop.cancel();
     coopui::native::guardGameInput(false);
     if (g_panel.frame && !g_panelLost) panelShowSeh(g_panel.frame, false);
     g_panel.open = false;

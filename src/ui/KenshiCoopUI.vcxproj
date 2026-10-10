@@ -2,7 +2,7 @@
 <Project DefaultTargets="Build" ToolsVersion="16.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <!--
     KenshiCoopUI.dll - the native F2 session panel, connection banner and
-    collapsible diagnostics. KenshiCoop.dll loads it from its own folder
+    movable diagnostics. KenshiCoop.dll loads it from its own folder
     through the C ABI in CoopUiApi.h; it is NOT an RE_Kenshi plugin entry.
     Build ONLY this DLL for UI iteration: scripts\build_ui.cmd [Config].
     Configurations mirror the core so a pair built with one config agrees on
@@ -114,6 +114,8 @@
   <ItemGroup>
     <ClInclude Include="CoopUiApi.h" />
     <ClInclude Include="NativeEdit.h" />
+    <ClInclude Include="UiPrivacy.h" />
+    <ClInclude Include="UiSession.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

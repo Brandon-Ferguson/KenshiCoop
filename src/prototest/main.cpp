@@ -71,6 +71,8 @@ static int g_total  = 0;
     else { std::printf("  FAIL %s (actual %llu != expected %llu)\n", name, a_, e_); ++g_failed; } \
 } while (0)
 
+#include "UiPresentationTests.h"
+
 // ---- 1. Wire contract: packed sizes ------------------------------------------
 
 static void testSizes() {
@@ -2039,6 +2041,7 @@ int main() {
     testSteamIdParse();
     testUdpEndpointParse();
     testPlayerNickParse();
+    testUiPresentation();
     testWorkPoseMatch();
     testTaskClear();
     testDeathRekey();

@@ -120,12 +120,20 @@
 
 Клиент может подключиться из главного меню: хост передаст свой мир.
 Ник, выбранный режим, адрес и единый UDP-порт запоминаются в `coop_config.json`;
-смена роли не возвращает старый порт. Во время сессии поля и переключатели
-заблокированы. **F2, Esc, крестик и «Скрыть (F2)» не отключают сеть**;
-для этого есть отдельная кнопка остановки. Справа показаны реальные этапы,
-передача мира и игроки. **«Диагностика»** раскрывает подробности; при переполнении
-используйте **«Копировать отчёт»**. Обновление мода имеет отдельный блок и не
-меняет состояние подключения.
+смена роли не возвращает старый порт. Во время сессии режим, способ подключения
+и адрес заблокированы; ник можно менять. Вместимость — **4 игрока всего: хост и
+до 3 друзей**. **F2, Esc, крестик и «Скрыть (F2)» не отключают сеть**.
+Остановка хоста с подключёнными гостями, в том числе ещё загружающими мир,
+требует подтверждения; по умолчанию выбрана **«Отмена»**, Esc также отменяет.
+Один хост и клиент отключаются без дополнительного диалога.
+
+Справа всегда видны состояние, этапы и игроки. Установленное соединение не
+означает готовность мира; неизвестная готовность явно помечена.
+**«Диагностика»** открывает отдельное перемещаемое окно со своей прокруткой,
+не заменяя список игроков. **«Копировать отчёт»** экспортирует полный текст,
+обезличивая имена, Steam ID и адреса, но сохраняя версии, состояния, ошибки,
+порты и измерения. Явная кнопка копирования Steam ID передаёт настоящий ID.
+Обновление мода имеет отдельный блок и не меняет состояние подключения.
 
 Кнопка **Discord** в нижней строке, перед «Диагностикой», открывает
 [сервер сообщества](https://discord.gg/UYcNPMrtup) в браузере по умолчанию.
@@ -140,7 +148,7 @@
 Приватная ветка `debug/live-net-telemetry` собирается командой
 `scripts\build_plugin.cmd Harness`: это оптимизированная сборка с диагностикой,
 а не конфигурация VS Debug с отладочной CRT. Статистика находится в
-сворачиваемом блоке **«Диагностика»** окна F2 и в **«Копировать отчёт»**;
+отдельном окне **«Диагностика»** и в **«Копировать отчёт»**;
 лог содержит строки `[net-diag]` раз в секунду. Байты/пакеты — локальный
 трафик ENet с повторами, не доказательство совпадения миров. Неизвестная
 готовность мира и отсутствующие измерения не выдаются за успешную синхронизацию.
@@ -274,11 +282,20 @@ are suppressed while editing. Nicks are limited to 63 UTF-8 bytes.
 
 Clients can connect from the main menu and receive the host's world. Nick,
 role, endpoint and one shared UDP port are remembered in `coop_config.json`;
-switching roles does not restore an old port. Fields and selectors are locked
-during a session. **F2, Esc, X and Hide never disconnect**; use the separate
-stop/disconnect action. The right column shows real milestones, transfer
-progress and players. **Diagnostics** expands details; **Copy report** includes
-overflowing lines. Mod updates have a separate section, not a connection status.
+switching roles does not restore an old port. Role, transport and endpoint are
+locked during a session; the nickname remains editable. Capacity is **4 players
+total: the host and up to 3 friends**. **F2, Esc, X and Hide never disconnect**.
+Stopping a host with accepted guests, including guests still loading the world,
+requires confirmation. **Cancel** is the default; Esc also cancels. Solo hosts
+and clients retain direct disconnection.
+
+The right column always shows state, milestones and players. Network connection
+does not imply world readiness; unknown readiness is explicitly labelled.
+**Diagnostics** opens a separate movable window with its own scrolling, without
+replacing the roster. **Copy report** exports the full text with participant
+names, Steam IDs and addresses anonymized, preserving versions, states, errors,
+ports and measurements. Explicit Steam ID copying still shares the real ID.
+Mod updates have a separate section, not a connection status.
 
 The **Discord** button in the footer, before Diagnostics, opens the
 [community server invite](https://discord.gg/UYcNPMrtup) in your default browser.
