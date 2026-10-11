@@ -100,6 +100,13 @@ public:
         return (ownHands_.find(k) != ownHands_.end()) ? 1 : 2;
     }
 
+    bool ownsInventoryLocalHand(const unsigned int h[5]) const {
+        Key k = keyForInvLocalHand(h);
+        return ownedContainers_.count(k) != 0 || ownHands_.count(k) != 0 ||
+               censusContainers_.count(k) != 0 ||
+               (isHostRole() && ownerClassForHand(h) == 0);
+    }
+
     // Scenario support (assault_mint): the hand of the MINTED proxy nearest the
     // body at refHand - a body this client had no local copy of and had to create
     // from the peer's spawn INFO. Only the proxy table knows this; the arm-time
@@ -223,6 +230,10 @@ public:
     // resend elapsed). No-op when no owned container is registered / resolves.
     void publishInventories(GameWorld* gw, NetLink& net, u32 ownerId);
 
+    // BEFORE engine: finish transfer commits once their native inventory settles,
+    // independently of ordinary inventory sync.
+    void publishDeferredInventoryCommits(GameWorld* gw, NetLink& net, u8 localOwnerId);
+
     // BEFORE engine (BOTH clients since the W1 bidir fix): scan the interest sphere for
     // free ground items WE author (peer proxies are filtered by the echo guard), assign/
     // reuse a netId per item (keyed by its local engine hand), and queue a reliable
@@ -300,13 +311,9 @@ public:
     // so the relocation beats the reconcile.
     void applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 localId);
 
-    // AFTER applyTransfers (protocol 50): drain verdicts for intents WE authored
-    // and settle them on the receiver's word instead of on a deadline. Accept
-    // clears our latches now; reject clears them too, which is what lets the
-    // owner's next snapshot reconcile our optimistic local move away. Unanswered
-    // intents are swept on the old wall clock, so a peer that never replies
-    // behaves exactly as before.
-    void applyXferAcks(GameWorld* gw, Inbound& in, u32 localId);
+    // AFTER applyTransfers: settle verdicts ingested atomically with their preceding
+    // canonical snapshots. Return rejected units before unpinning the inventories.
+    void applyXferAcks(GameWorld* gw, u32 localId);
 
     // BEFORE engine, after publishOwned (phase 2 vitals sync): stream each OWNED
     // player-squad member's medical model (blood, bleed, limb flesh/bandaging,
@@ -811,6 +818,9 @@ public:
 private:
     struct Key {
         u32 t, c, cs, i, s;
+        bool operator==(const Key& o) const {
+            return t == o.t && c == o.c && cs == o.cs && i == o.i && s == o.s;
+        }
         bool operator<(const Key& o) const {
             if (t != o.t) return t < o.t;
             if (c != o.c) return c < o.c;
@@ -1636,6 +1646,11 @@ private:
     u32                                       nextXferId_;
     std::map<std::pair<u32, u32>, InboundInvXferAck> appliedXfers_;
     std::map<std::pair<u32, u32>, InboundInvXfer> pendingXfers_;
+    std::deque<InboundInvXferAck> receivedXferAcks_;
+    // Canonical wire inventories awaiting a full snapshot after an additive verdict.
+    std::set<Key> deferredInvCommits_;
+    void queueXferVerdict(GameWorld* gw, NetLink& net, const InvXferPacket& intent,
+                          const InboundInvXferAck& result);
     // Locally completed moves awaiting the other endpoint's authority verdict.
     // A refusal reverses the actual unaccepted units before publishing our pockets.
     struct XferOut {
@@ -1648,13 +1663,15 @@ private:
         unsigned long sentMs;
         u32           peerId;
         int           rollbackQty;
+        int           appliedQty;
         bool          answered;
         Item* bagItem;
+        unsigned __int64 verdictToken;
         bool hasCanonicalBag;
         std::vector<InvItemEntry> canonicalBag;
     };
     std::map<u32, XferOut>                    xferOut_;
-    // Undo only rejected units; ACCEPT must wait for the authority's later snapshot.
+    // Release each intent's contribution after its canonical snapshot and verdict.
     void releaseXferLatch(const Key& k, const XKey& key, int delta);
     std::map<std::pair<Key, std::string>, unsigned long> wdSuppress_;
     // True while the transfer detector is watching an unresolved LOSS of `sid` from
@@ -1987,15 +2004,16 @@ private:
     u32           facSeqOut_;
     unsigned long facSampleMs_;
     bool          factionSync_;
-    // Protocol 26 door-state sync, per door hand (the faction shape: known =
-    // baseline, updated on every local change sent AND every received row
-    // applied - the echo guard; lastSendMs = change gate + safety resend;
-    // seqSeen = stale-row guard).
+    // Door/lock channel: shared applied baseline, per-sender sequence guards,
+    // and a pending desired state retained while the native object is unloaded.
     struct DoorRow {
         int knownOpen; int knownLocked; unsigned long lastSendMs;
-        u32 seqSeen; bool seeded;
+        u32 seqSeen[MAX_PLAYERS]; u32 pendingSeq;
+        bool seeded; bool pending;
         DoorRow() : knownOpen(-1), knownLocked(-1), lastSendMs(0),
-                    seqSeen(0), seeded(false) {}
+                    pendingSeq(0), seeded(false), pending(false) {
+            memset(seqSeen, 0, sizeof(seqSeen));
+        }
     };
     std::map<Key, DoorRow> doorRows_;
     u32           doorSeqOut_;
@@ -2181,6 +2199,8 @@ private:
     bool resolveInvWireHand(const Key& k,unsigned int out[5]) const;
     Key keyForInvLocalHand(const unsigned int hand[5]) const;
     Key invWireKeyForLocal(const Key& local) const;
+    void inventorySnapshotIdentity(const Key& local, u32 wireKey[5], u8& keyKind) const;
+    bool inventoryCommitPending(const unsigned int hand[5]) const;
     // The same host-hand -> local-instance remap, for EVENTS.
     //
     // An event names a body by the AUTHOR's hand. For a save-native body that
@@ -2219,21 +2239,18 @@ private:
     unsigned char nickHandSet_[MAX_PLAYERS];
     // Local captured hand -> save-stable wire hand (join claim rewrite).
     std::map<Key, Key> publishAsWire_;
+    const Key& ownedWireKey(const Key& native) const {
+        std::map<Key, Key>::const_iterator wire = publishAsWire_.find(native);
+        return wire == publishAsWire_.end() ? native : wire->second;
+    }
     // Wire container (the author's platoon) -> THIS client's local container.
     // A join-minted tab has a host-unknown serial, so joinPlayerSquadAt used to
     // dump the body into Безымянные_0 (the leader tab). First member mints a
     // local tab; later members of the same wire tab follow via this alias.
     std::map<std::pair<u32, u32>, std::pair<u32, u32> > peerTabAlias_;
-    // Roster edges WE caused. insertPeerMember re-containers a peer's body into
-    // our squad so we can drive it, and the engine cannot tell that apart from
-    // the user dragging a member between tabs - so publishSquadMoves echoed the
-    // insertion back as OUR move and pinned the peer's character owned.
-    // Measured 2026-08-03: the host inserted the join's character, published the
-    // insertion, and the join then pinned its own character peer-owned, drove it
-    // from our stream, vetoed its death mid-tick and faulted the engine twenty
-    // times in 230 ms. Keyed on the character SERIAL - the one hand field a
-    // re-container preserves - and consumed on the first matching edge.
-    std::map<u32, unsigned long> moveEcho_;
+    // Exact native before -> after edges caused by replication, not user moves.
+    // Re-platooning can change every hand field, including the serial.
+    std::map<Key, std::pair<Key, unsigned long> > moveEcho_;
     // Hands we published as having LEFT our squad. The exit clears the pins and
     // captureSquad stops returning the body, so both drive guards (ownHands_,
     // pinOwned_) go quiet at once and the peer's in-flight tail for that hand
@@ -2743,14 +2760,11 @@ private:
         UnresolvedHand() : x(0), y(0), z(0), fromCensus(false), forceReq(false) {}
     };
     std::map<Key, UnresolvedHand> unresolvedHands_;
-    // JOIN: recruited/re-keyed hands whose rekeyPeerBody landed ok=0 (no local
-    // body to bind - the recruit fired while this hand was outside our interest,
-    // the interest-split "join never saw Ruka" report). A reliable EVT_RECRUIT
-    // PROVES the hand is a legit host body that must appear, so these force a
-    // spawn REQ regardless of the send-side proximity gate (a far recruit is
-    // still streamed as a host-owned member, so it must resolve). Entries clear
-    // once the hand binds a proxy or resolves to a real local body.
-    std::set<Key> forceReqHands_;
+    // Recruited/re-keyed hands awaiting a native body after a reliable edge.
+    // Force the spawn request regardless of the ordinary proximity gate.
+    // Entries retain the destination ownership verdict until a real body binds.
+    // Never pin an unresolved owned hand: that would veto its own spawn request.
+    std::map<Key, bool> forceReqHands_;
     // JOIN: census-mint reach (see setSpawnMintRadius) + the census-missing
     // scan throttle (the resolve sweep over censusHands_ runs at ~0.5 Hz, not
     // per tick).

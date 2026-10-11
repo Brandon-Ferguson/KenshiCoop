@@ -251,7 +251,7 @@ private:
     void logCensus(const ScenarioContext& ctx) {
         // Doors (the sync save has one baked door in range).
         engine::DoorRead rows[MAX_DOORS];
-        unsigned int nd = engine::enumDoorsNear(ctx.gw, 100.0f, rows, MAX_DOORS);
+        unsigned int nd = engine::enumDoorsNear(ctx.gw, 100.0f, rows, MAX_DOORS, true);
         for (unsigned int i = 0; i < nd && i < 4; ++i) {
             char b[176];
             _snprintf(b, sizeof(b) - 1,
@@ -298,7 +298,7 @@ private:
 
     bool pickDoor(const ScenarioContext& ctx, unsigned int outHand[5]) {
         engine::DoorRead rows[MAX_DOORS];
-        unsigned int n = engine::enumDoorsNear(ctx.gw, 100.0f, rows, MAX_DOORS);
+        unsigned int n = engine::enumDoorsNear(ctx.gw, 100.0f, rows, MAX_DOORS, true);
         if (n == 0) return false;
         unsigned int best = 0; // lowest (serial, index) = the door_sync pick
         for (unsigned int i = 1; i < n; ++i) {

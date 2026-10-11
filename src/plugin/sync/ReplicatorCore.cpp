@@ -278,6 +278,8 @@ void Replicator::resetSession() {
     xferOut_.clear();
     appliedXfers_.clear();
     pendingXfers_.clear();
+    receivedXferAcks_.clear();
+    deferredInvCommits_.clear();
     engine::clearItemTransfers();
     wdSuppress_.clear();
     medPub_.clear();
@@ -464,7 +466,15 @@ void Replicator::setOwnedContainerHand(const unsigned int hand[5]) {
 }
 
 void Replicator::ingestInv(Inbound& in) {
-    std::deque<InboundInv> got; in.drainInv(got);
+    std::deque<InboundInv> got;
+    std::deque<InboundInvXferAck> verdicts;
+    in.drainInventory(got, verdicts);
+    if (receivedXferAcks_.empty()) receivedXferAcks_.swap(verdicts);
+    else for (std::deque<InboundInvXferAck>::iterator v = verdicts.begin(); v != verdicts.end(); ++v) {
+        receivedXferAcks_.push_back(InboundInvXferAck());
+        InboundInvXferAck& pending = receivedXferAcks_.back();
+        pending.ownerId = v->ownerId; pending.pkt = v->pkt; pending.contents.swap(v->contents);
+    }
     typedef std::pair<u32,Key> PendingKey;
     for (std::deque<InboundInv>::iterator it=got.begin();it!=got.end();++it) {
         Key wire=keyForInvLocalHand(it->cKey);

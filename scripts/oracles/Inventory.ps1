@@ -1618,7 +1618,7 @@ function Test-CriticalInventory {
     $shopSets = @()
     foreach ($file in @($HostFile, $JoinFile)) {
         if (-not (Test-Path $file)) { $ok = $false; continue }
-        $start = Select-String -Path $file -Pattern 'SCENARIO (critical_[a-z_]+) start' |
+        $start = Select-String -Path $file -Pattern 'SCENARIO (critical_[a-z_]+|chest_lock) start' |
             Select-Object -Last 1
         if ($null -eq $start) { $ok = $false; continue }
         $name = $start.Matches[0].Groups[1].Value
@@ -1629,6 +1629,12 @@ function Test-CriticalInventory {
         if ($null -eq $result -or $result.Matches[0].Groups[1].Value -ne 'PASS') {
             $ok = $false
         }
+        if ($name -eq 'chest_lock') {
+            $last = Select-String -Path $file -Pattern 'CRIT LOCK host=\d t=\d+ locked=0 initial=1 client=1 hostLeg=1 final=1' |
+                Select-Object -Last 1
+            if ($null -eq $last) { $ok = $false }
+            continue
+        }
         if ($name -eq 'critical_ground') {
             $last = Select-String -Path $file -Pattern 'CRIT GROUND host=\d t=\d+ ground=(-?\d+) expected=(\d+)' |
                 Select-Object -Last 1
@@ -1636,13 +1642,18 @@ function Test-CriticalInventory {
                 [int]$last.Matches[0].Groups[1].Value -ne [int]$last.Matches[0].Groups[2].Value) {
                 $ok = $false
             }
-        } elseif ($name -in @('critical_bag', 'critical_bag_take')) {
+        } elseif ($name -in @('critical_bag', 'critical_bag_take', 'critical_bag_hold')) {
             $last = Select-String -Path $file -Pattern 'CRIT BAG host=\d t=\d+ src=(\d+) dst=(\d+) inside=(\d+) expected=(\d+) moved=\d+ pass=\d' |
                 Select-Object -Last 1
             if ($null -eq $last) { $ok = $false; continue }
             $g = $last.Matches[0].Groups
             if ([int]$g[1].Value -ne 0 -or [int]$g[2].Value -ne 1 -or
                 [int]$g[3].Value -ne [int]$g[4].Value) { $ok = $false }
+        } elseif ($name -eq 'critical_bag_nested_reserved') {
+            if ($file -eq $JoinFile -and
+                -not (Select-String -Path $file -Pattern 'CRIT BAG NESTED took=1 bag-remove-blocked=1 contents=4')) {
+                $ok = $false
+            }
         } elseif ($name -in @('critical_shops_squin', 'critical_shops_waystation')) {
             $samples = @(Select-String -Path $file -Pattern 'CRIT SHOP host=\d t=(\d+) key=([\d,]+) open=(\d) qty=(\d+) hash=([0-9A-F]+)' |
                 Where-Object { [int]$_.Matches[0].Groups[1].Value -ge 40000 })
@@ -1673,6 +1684,10 @@ function Test-CriticalInventory {
                 $g[5].Value -ne '1' -or $g[6].Value -ne '1' -or $g[7].Value -ne '1') {
                 $ok = $false
             }
+            if ($name -eq 'critical_ore_pending' -and $file -eq $JoinFile -and
+                -not (Select-String -Path $file -Pattern 'CRIT PENDING host=0 blocked=1')) {
+                $ok = $false
+            }
         }
     }
     if ($scenario -in @('critical_shops_squin', 'critical_shops_waystation')) {
@@ -1686,5 +1701,5 @@ function Test-CriticalInventory {
         }
     }
     return (Add-GateResult -Name 'critical_inventory' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
-        -Metrics @{ scenario = $scenario } -Detail 'native item conservation and convergence on both peers')
+        -Metrics @{ scenario = $scenario } -Detail 'native item conservation and shared lock transitions on both peers')
 }

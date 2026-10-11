@@ -1554,12 +1554,48 @@ int addItemsToContainerBySid(GameWorld* gw, const unsigned int cHand[5],
     return ok ? qty : 0;
 }
 
+#ifdef KENSHICOOP_HARNESS
+Item* holdInventoryBag(GameWorld* gw, const unsigned int source[5], const char* sid) {
+    if (!gw || !sid) return 0;
+    __try {
+        Inventory* inventory = invOf(resolveObjectByHand(source));
+        if (!inventory) return 0;
+        InvItemEntry rows[INV_ITEMS_MAX]; Item* items[INV_ITEMS_MAX];
+        unsigned int count = readInvItems(inventory, rows, items, INV_ITEMS_MAX, 0);
+        for (unsigned int i = 0; i < count; ++i)
+            if (items[i] && isContainerItemType(rows[i].itemType) &&
+                strcmp(rows[i].stringID, sid) == 0)
+                return inventory->removeItemDontDestroy_returnsItem(items[i], 1, true);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return 0;
+}
+
+bool putHeldInventoryBag(GameWorld* gw, const unsigned int destination[5], Item* bag) {
+    if (!gw || !bag) return false;
+    __try {
+        Inventory* inventory = invOf(resolveObjectByHand(destination));
+        return inventory && (inventory->tryAddItem(bag, 1) || equipExisting(inventory, bag) != 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
+}
+
+bool inventoryBagHand(GameWorld* gw, const unsigned int carrier[5], unsigned int out[5]) {
+    __try {
+        Inventory* sub = nestedInventoryOf(gw, carrier, 0);
+        return sub && sub->owner && readObjectHand(sub->owner, out);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
+}
+#endif
+
 int moveItemBetweenContainers(GameWorld* gw, const unsigned int srcHand[5],
                               const unsigned int dstHand[5],
                               const char* sid, unsigned int typeCat, int qty,
                               bool suspendVeto,
                               const std::vector<InvItemEntry>* suppliedBag,
-                              std::vector<InvItemEntry>* actualBag) {
+                              std::vector<InvItemEntry>* actualBag,
+                              void* exactSourceItem,
+                              bool respectReservations) {
     if (!gw || !sid || !sid[0] || qty <= 0) return 0;
     RootObject* srcRo = resolveObjectByHand(srcHand);
     RootObject* dstRo = resolveObjectByHand(dstHand);
@@ -1572,11 +1608,9 @@ int moveItemBetweenContainers(GameWorld* gw, const unsigned int srcHand[5],
     Item* curItems[64];
     unsigned int ncur = readInvItems(src, cur, curItems, MAXC, 0, true);
     int moved = 0;
-    // This is normally a SANCTIONED cross-owner relocation (Protocol 37
-    // conservation), so suspend the trade veto for its duration - the veto only
-    // exists to refuse genuine UI drags, never our own reconciled moves. The
-    // xfer_block test passes suspendVeto=false to drive it AS a UI drag would
-    // (veto active), so it can assert the refusal + item conservation.
+    // Sanctioned sync moves suspend veto/capture, but still respect reservations
+    // below unless rollback explicitly opts out. Native UI-like moves leave the
+    // hooks active, including their reservation checks.
     bool vetoSav = g_invVetoSuspend; if (suspendVeto) g_invVetoSuspend = true;
     __try {
         // Loose stacks first (the ordinary bag-to-bag drag), then worn copies (the
@@ -1584,6 +1618,7 @@ int moveItemBetweenContainers(GameWorld* gw, const unsigned int srcHand[5],
         for (int pass = 0; pass < 2 && moved < qty; ++pass) {
             for (unsigned int i = 0; i < ncur && moved < qty; ++i) {
                 if (!curItems[i]) continue;
+                if (exactSourceItem && curItems[i] != exactSourceItem) continue;
                 if (cur[i].itemType != typeCat) continue;
                 if ((int)cur[i].equipped != pass) continue;
                 if (strcmp(cur[i].stringID, sid) != 0) continue;
@@ -1596,6 +1631,8 @@ int moveItemBetweenContainers(GameWorld* gw, const unsigned int srcHand[5],
                     from = curItems[p]->getInventory();
                     if (!from) continue;
                 }
+                if (respectReservations && suspendVeto &&
+                    transferVerdictPending(from, curItems[i])) continue;
                 Item* taken = from->removeItemDontDestroy_returnsItem(curItems[i], take, true);
                 if (!taken) continue;
                 if (isContainerItemType(typeCat)) {

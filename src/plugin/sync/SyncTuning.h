@@ -34,7 +34,6 @@ struct SyncTuning {
 
     // Baked doors (protocol 26): doors move in clicks; 1 Hz sample.
     unsigned long doorSampleMs;
-    unsigned long doorResendMs;
 
     // Production machines (protocol 33): machines tick slowly; 1 Hz sample,
     // resend doubles as the join drift corrector.
@@ -64,7 +63,7 @@ struct SyncTuning {
     SyncTuning()
         : moneyMinSendMs(1000),   moneyResendMs(5000),
           factionSampleMs(1000),  factionResendMs(10000),
-          doorSampleMs(1000),     doorResendMs(10000),
+          doorSampleMs(1000),
           prodSampleMs(1000),     prodResendMs(10000),
           researchSampleMs(1000), researchResendMs(15000),
           deedSampleMs(1000),     deedResendMs(15000),

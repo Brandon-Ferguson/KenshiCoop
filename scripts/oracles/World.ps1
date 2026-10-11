@@ -500,23 +500,17 @@ function Test-RecruitCtl {
         $s = @($a | Sort-Object)
         return [double]$s[[int]([math]::Floor($s.Count / 2))]
     }
-    # Phase A (owner=host, driver=join) is the DRIVEN-gait regression the user
-    # reported (Adi walked on the join) - a HARD gate. Phase B (owner=join,
-    # driver=host, after a HOST-authored cross-tab transfer) exercises the
-    # author-side control-RELEASE path, which is a separate capability (the
-    # author currently pins the moved body owned unconditionally); it is recorded
-    # ADVISORY here until that release + owner-side run of a just-claimed body
-    # land (a synthetic non-inhabit run has no rank latch, so it is not a
-    # reliable gate).
+    # Both handoff directions must reproduce actual native run motion.
+    # Phase B is no longer advisory: the author releases control to the join.
     foreach ($ph in @(
-        @{ p = 'A'; ownerFile = $HostFile; drvFile = $JoinFile; hard = $true },
-        @{ p = 'B'; ownerFile = $JoinFile; drvFile = $HostFile; hard = $false })) {
+        @{ p = 'A'; ownerFile = $HostFile; drvFile = $JoinFile },
+        @{ p = 'B'; ownerFile = $JoinFile; drvFile = $HostFile })) {
         $own = _ctlSpeeds $ph.ownerFile $ph.p 'own'   $gRegex
         $drv = _ctlSpeeds $ph.drvFile   $ph.p 'drive' $gRegex
         $ownMed = _ctlMedian $own
         $drvMed = _ctlMedian $drv
-        Write-Host ("    FINDING: gait phase={0} owner n={1} med={2} driver n={3} med={4} hard={5}" -f `
-            $ph.p, $own.Count, [math]::Round($ownMed, 2), $drv.Count, [math]::Round($drvMed, 2), $ph.hard)
+        Write-Host ("    FINDING: gait phase={0} owner n={1} med={2} driver n={3} med={4}" -f `
+            $ph.p, $own.Count, [math]::Round($ownMed, 2), $drv.Count, [math]::Round($drvMed, 2))
         $fail = $null
         if ($own.Count -lt 5 -or $ownMed -lt $RUN_MIN) {
             $fail = "phase $($ph.p): owner never ran (n=$($own.Count) med=$([math]::Round($ownMed,2)))"
@@ -525,10 +519,7 @@ function Test-RecruitCtl {
         } elseif ($drvMed -lt ($GAIT_RATIO * $ownMed)) {
             $fail = "phase $($ph.p): driver gait too slow (med=$([math]::Round($drvMed,2)) < $GAIT_RATIO x owner $([math]::Round($ownMed,2))) - walking not running"
         }
-        if ($null -ne $fail) {
-            if ($ph.hard) { $why += $fail }
-            else { Write-Host "    ADVISORY: $fail (author-side control-release follow-up)" }
-        }
+        if ($null -ne $fail) { $why += $fail }
     }
 
     # --- Anti-phantom: a claimed hand must never be proxy-minted ---------------
@@ -550,6 +541,90 @@ function Test-RecruitCtl {
     Write-Host "  RECRUIT-CTL $v - $detail"
     return (Add-GateResult -Name "recruit_ctl" -Status $v `
                 -Metrics @{ phantom = $phantom; flips = $flip } -Detail $detail)
+}
+
+function Test-RecruitAuthority {
+    param([string]$HostFile, [string]$JoinFile)
+    $why = @(); $series = @()
+    $rx = 'SCENARIO RECRUIT COMBAT host=(?<host>[01]) t=(?<t>\d+) .*?samples=(?<samples>\d+) blood=(?<blood>-?[\d.]+) .*?damaged=(?<damaged>[01]) owner=(?<owner>\d+) authority=(?<authority>[01]) victim=(?<hand>\d+(?:,\d+){4})'
+    foreach ($side in @(@{ file=$HostFile; owner=2 }, @{ file=$JoinFile; owner=1 })) {
+        $rows = @(
+            foreach ($m in @(Select-String -Path $side.file -Pattern $rx)) {
+                $g=$m.Matches[0].Groups
+                if ([int]$g['t'].Value -lt 30000) { continue }
+                [pscustomobject]@{
+                    t=[int]$g['t'].Value; blood=[double]$g['blood'].Value
+                    owner=[int]$g['owner'].Value; authority=[int]$g['authority'].Value
+                    samples=[int]$g['samples'].Value; damaged=[int]$g['damaged'].Value
+                }
+            }
+        )
+        $series += ,$rows
+        if ($rows.Count -lt 20) { $why += "insufficient native ownership samples: $($side.file)" }
+        if (@($rows | Where-Object { $_.owner -ne $side.owner -or $_.authority -ne 1 }).Count) {
+            $why += "handoff did not retain one Client author: $($side.file)"
+        }
+        if (@(Select-String -Path $side.file -Pattern 'SCENARIO RESULT PASS').Count -ne 1) {
+            $why += "native scenario failed: $($side.file)"
+        }
+    }
+    $h=$series[0]; $j=$series[1]; $deltas=@(); $finalDelta=-1.0
+    if ($h.Count -and $j.Count) {
+        $last=$j[-1]
+        if ($last.samples -lt 2 -or $last.damaged -ne 1) {
+            $why += 'real NPC targeting and Client-owned injury were not observed'
+        }
+        foreach ($jr in @($j | Where-Object { $_.t -ge 45000 -and $_.blood -ge 0 })) {
+            $nearest=$null; $dt=751
+            foreach ($hr in $h) {
+                $distance=[math]::Abs($hr.t-$jr.t)
+                if ($hr.blood -ge 0 -and $distance -lt $dt) { $nearest=$hr; $dt=$distance }
+            }
+            if ($null -ne $nearest) { $deltas += [math]::Abs($nearest.blood-$jr.blood) }
+        }
+        $finalDelta=[math]::Abs($h[-1].blood-$last.blood)
+    }
+    $median=-1.0
+    if ($deltas.Count -lt 20) { $why += 'insufficient paired native blood observations' }
+    else {
+        $sorted=@($deltas | Sort-Object)
+        $median=$sorted[[int][math]::Floor($sorted.Count/2)]
+        if ($median -gt 1.5 -or $finalDelta -gt 1.5) {
+            $why += "native blood diverged: median=$median final=$finalDelta"
+        }
+    }
+    $status=if ($why.Count) { 'FAIL' } else { 'PASS' }
+    return (Add-GateResult -Name 'recruit_authority' -Status $status `
+        -Metrics @{ bloodPairs=$deltas.Count; bloodMedian=$median; bloodFinal=$finalDelta } `
+        -Detail ($why -join '; '))
+}
+
+function Test-OwnTabReturn {
+    param([string]$HostFile, [string]$JoinFile)
+    $why=@()
+    $rx='SCENARIO OWN RETURN host=(?<host>[01]) t=(?<t>\d+) fixture=(?<fixture>[01]) sep=(?<sep>-?\d+) back=(?<back>-?\d+) owner=(?<owner>\d+) authority=(?<authority>[01]) moving=(?<moving>\d+)'
+    foreach ($side in @(@{ file=$HostFile; owner=1; host=$true }, @{ file=$JoinFile; owner=2; host=$false })) {
+        $rows=@(Select-String -Path $side.file -Pattern $rx)
+        if ($rows.Count -lt 20) { $why += "insufficient native return samples: $($side.file)" }
+        foreach ($row in $rows) {
+            $g=$row.Matches[0].Groups
+            if ([int]$g['owner'].Value -ne $side.owner -or $g['authority'].Value -ne '1') {
+                $why += "owned-tab return lost its Host author: $($side.file)"; break
+            }
+        }
+        if ($rows.Count) {
+            $g=$rows[-1].Matches[0].Groups
+            if ([int]$g['moving'].Value -lt 3) { $why += "actual native movement missing: $($side.file)" }
+            if ($side.host -and ($g['fixture'].Value -ne '1' -or $g['sep'].Value -ne '1' -or $g['back'].Value -ne '1')) {
+                $why += 'shared-tab peer fixture or native round-trip did not occur'
+            }
+        }
+        if (@(Select-String -Path $side.file -Pattern 'SCENARIO RESULT PASS').Count -ne 1) {
+            $why += "native return scenario failed: $($side.file)"
+        }
+    }
+    $status=if ($why.Count) { 'FAIL' } else { 'PASS' }
+    return (Add-GateResult -Name 'own_tab_return' -Status $status -Detail ($why -join '; '))
 }
 
 # Test-CampApproach (Phase 2 crash-hardening SOAK): validate the fix MECHANISMS

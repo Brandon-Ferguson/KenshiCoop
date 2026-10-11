@@ -172,8 +172,8 @@ typedef LockedArmour* (__fastcall* GetShacklesFn)(Character* self);
 // Read-only, and the point of reading it is to make a non-escape diagnosable:
 // a scenario that raises lockpicking and then waits can fail either because the
 // engine rates the attempt at zero or because the AI never tried, and those
-// need opposite fixes. DoorLock is forward-declared only - the pointer comes
-// straight from LockedArmour::lock and is never dereferenced by us.
+// need opposite fixes. This lever passes the forward-declared DoorLock pointer
+// straight from LockedArmour::lock to the engine without inspecting its layout.
 typedef float     (__fastcall* GetLockpickChanceFn)(Character* self,
                                                     DoorLock* victim);
 // Jail-probe read lever: Character::isSlave() -> SlaveStateEnum (0 NOT_SLAVE /
@@ -517,12 +517,15 @@ extern TownRecalcLevelFn    g_townRecalcLevelFn;
 extern TownIsPlayerBldgsFn  g_townIsPlayerBldgsFn;
 extern BuyItemFn g_buyItemOrig;
 
-// Cross-owner trade veto (see Engine.h installXferBlockHook). g_invVetoSuspend
-// is the reentrancy guard: the Replicator's OWN item relocations that re-home a
-// REAL tracked item across the ownership boundary (W3 pickup addItemPtrToInventory,
-// the retired Protocol 37 moveItemBetweenContainers) set it around their tryAddItem
-// call so the veto never refuses a sanctioned sync move (only genuine UI drags).
+// Cross-owner trade veto (see Engine.h installXferBlockHook). Sanctioned sync
+// relocations set g_invVetoSuspend around native calls to suspend veto/capture.
+// This is independent of moveItemBetweenContainers' default reservation guard.
 extern bool g_invVetoSuspend;
+// Whole-bag verdicts reserve the exact bag and its inventory. Loose verdicts reserve
+// the destination's SID/type, including any bag holding matching live contents,
+// because native stack merging may destroy the transferred item's pointer.
+// Native read faults fail closed while a verdict is pending.
+bool transferVerdictPending(Inventory* inventory, Item* item);
 
 // recruitment + squad moves
 extern RecruitFn g_recruitFn;

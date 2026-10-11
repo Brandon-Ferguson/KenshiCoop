@@ -758,6 +758,7 @@ static RemoveAutoDestroyFn g_removeAutoDestroyOrig=0;
 bool g_invVetoSuspend = false;            // Replicator's own move in progress (extern)
 static bool           g_blockXfer   = false;
 static InvOwnerClassFn g_invOwnerClass = 0;
+static InvAuthorityFn g_invAuthority = 0;
 struct PendingRemoval {
     Item* item;
     Inventory* inventory;
@@ -798,8 +799,16 @@ static ItemTransferEdge g_itemTransfers[256];
 static unsigned int g_itemTransferCount = 0;
 static std::vector<InvItemEntry> g_transferContents[256];
 static bool g_transferContentsUsed[256] = { false };
-static Item* g_unconfirmedBags[256];
-static unsigned int g_unconfirmedBagCount = 0;
+struct PendingVerdict {
+    unsigned __int64 token;
+    unsigned int destination[5];
+    char stringID[48];
+    unsigned int itemType;
+    Item* bag; // only bags: a loose Item* may be destroyed by stack merging
+};
+static PendingVerdict g_pendingVerdicts[256];
+static unsigned int g_pendingVerdictCount = 0;
+static unsigned __int64 g_verdictSerial = 0;
 
 void takeItemTransferContents(unsigned int slot, std::vector<InvItemEntry>& contents) {
     if (slot >= 256) return;
@@ -807,20 +816,15 @@ void takeItemTransferContents(unsigned int slot, std::vector<InvItemEntry>& cont
     g_transferContentsUsed[slot] = false;
 }
 
-void finishTransferredBag(Item* bag) {
-    for (unsigned int i = 0; i < g_unconfirmedBagCount; ++i)
-        if (g_unconfirmedBags[i] == bag) {
-            g_unconfirmedBags[i] = g_unconfirmedBags[--g_unconfirmedBagCount];
+void finishItemTransfer(unsigned __int64 token) {
+    if (!token) return;
+    for (unsigned int i = 0; i < g_pendingVerdictCount; ++i)
+        if (g_pendingVerdicts[i].token == token) {
+            g_pendingVerdicts[i] = g_pendingVerdicts[--g_pendingVerdictCount];
             return;
         }
 }
 
-static bool bagVerdictPending(Inventory* inventory, Item* item) {
-    for (unsigned int i = 0; i < g_unconfirmedBagCount; ++i)
-        if (g_unconfirmedBags[i] == item ||
-            (inventory && inventory->owner == g_unconfirmedBags[i])) return true;
-    return false;
-}
 
 unsigned int drainItemTransfers(ItemTransferEdge* out, unsigned int maxOut) {
     unsigned int n = g_itemTransferCount < maxOut ? g_itemTransferCount : maxOut;
@@ -836,7 +840,7 @@ unsigned int drainItemTransfers(ItemTransferEdge* out, unsigned int maxOut) {
 void clearItemTransfers() {
     g_itemTransferCount = 0;
     g_pendingRemovalCount=0;
-    g_unconfirmedBagCount = 0;
+    g_pendingVerdictCount = 0;
     for (unsigned int i = 0; i < 256; ++i) {
         g_transferContents[i].clear();
         g_transferContentsUsed[i] = false;
@@ -846,6 +850,14 @@ void clearItemTransfers() {
 bool itemTransferPending(const unsigned int ownerHand[5]) {
     for (unsigned int i=0;i<g_pendingRemovalCount;++i)
         if (memcmp(ownerHand,g_pendingRemovals[i].owner,sizeof(g_pendingRemovals[i].owner))==0)
+            return true;
+    for (unsigned int i=0;i<g_itemTransferCount;++i)
+        if (memcmp(ownerHand,g_itemTransfers[i].src,sizeof(g_itemTransfers[i].src))==0 ||
+            memcmp(ownerHand,g_itemTransfers[i].dst,sizeof(g_itemTransfers[i].dst))==0)
+            return true;
+    for (unsigned int i=0;i<g_pendingVerdictCount;++i)
+        if (memcmp(ownerHand,g_pendingVerdicts[i].destination,
+                   sizeof(g_pendingVerdicts[i].destination))==0)
             return true;
     return false;
 }
@@ -873,6 +885,38 @@ static bool ownerHandOfInventory(Inventory* inv, unsigned int out[5]) {
     }
     return false;
 }
+bool transferVerdictPending(Inventory* inventory, Item* item) {
+    if (!g_pendingVerdictCount || !inventory || !item) return false;
+    __try {
+        unsigned int owner[5];
+        bool haveOwner = ownerHandOfInventory(inventory, owner);
+        GameData* gd = item->getGameData();
+        for (unsigned int i = 0; i < g_pendingVerdictCount; ++i) {
+            const PendingVerdict& p = g_pendingVerdicts[i];
+            if (p.bag) {
+                if (p.bag == item || inventory->owner == p.bag) return true;
+                continue;
+            }
+            if (!haveOwner || memcmp(owner, p.destination, sizeof(owner)) != 0) continue;
+            if (gd && p.itemType == (unsigned int)gd->type &&
+                gd->stringID == p.stringID) return true;
+            if (gd && isContainerItemType((unsigned int)gd->type)) {
+                Inventory* sub = item->getInventory();
+                if (!sub) continue;
+                lektor<Item*>& contents = sub->_allItems;
+                unsigned int count = contents.size();
+                for (unsigned int c = 0; c < count; ++c) {
+                    Item* child = contents[c];
+                    if (!child) continue;
+                    GameData* childData = child->getGameData();
+                    if (childData && p.itemType == (unsigned int)childData->type &&
+                        childData->stringID == p.stringID) return true;
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return true; }
+    return false;
+}
 
 // A trader aggregate can remove from a shelf's actual inventory. Preserve that
 // item's real parent, not the aggregate's transient/empty owner handle.
@@ -891,7 +935,7 @@ Item* __fastcall removeDontDestroy_hook(Inventory* self,Item* item,int quantity,
     bool wasEquipped = false;
     if (!g_invVetoSuspend) {
         __try {
-            if (bagVerdictPending(self, item)) return 0;
+            if (transferVerdictPending(self, item)) return 0;
             wasEquipped = item && item->isEquipped;
             known=sourceHandOfItem(item,source) || ownerHandOfInventory(self,source);
         }
@@ -915,7 +959,7 @@ Item* __fastcall removeDontDestroy_hook(Inventory* self,Item* item,int quantity,
 }
 
 bool __fastcall removeAutoDestroy_hook(Inventory* self,Item* item,int quantity) {
-    if (!g_invVetoSuspend && bagVerdictPending(self, item)) return false;
+    if (!g_invVetoSuspend && transferVerdictPending(self, item)) return false;
     unsigned __int64 before=g_pendingRemovalStamp;
     bool ok=g_removeAutoDestroyOrig(self,item,quantity);
     for (unsigned int i=0;i<g_pendingRemovalCount;)
@@ -929,6 +973,7 @@ bool __fastcall removeAutoDestroy_hook(Inventory* self,Item* item,int quantity) 
 static bool addItemWithCapture(Inventory* self, Item* item, int quantity, bool equip) {
     ItemTransferEdge edge;
     bool capture = false;
+    bool needsVerdict = false;
     int pending=g_invVetoSuspend ? -1 : pendingRemovalFor(item);
     unsigned __int64 pendingStamp=pending>=0 ? g_pendingRemovals[pending].stamp : 0;
     if (!g_invVetoSuspend && g_invOwnerClass && self && item) {
@@ -965,6 +1010,8 @@ static bool addItemWithCapture(Inventory* self, Item* item, int quantity, bool e
                     edge.item.level = gradeLevelOf(item);
                     fillItemProvenance(item, edge.item);
                     capture = q > 0;
+                    needsVerdict = capture && g_invAuthority &&
+                        (!g_invAuthority(srcHand) || !g_invAuthority(dstHand));
                 }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) { decision = 0; capture = false; }
@@ -991,8 +1038,7 @@ static bool addItemWithCapture(Inventory* self, Item* item, int quantity, bool e
             !(g_blockXfer && decision == 1) && g_itemTransferCount < 256) {
             unsigned int slot = 0;
             while (slot < 256 && g_transferContentsUsed[slot]) ++slot;
-            bagUnavailable = slot == 256 ||
-                (srcClass != 1 && dstClass == 1 && g_unconfirmedBagCount == 256);
+            bagUnavailable = slot == 256;
             if (!bagUnavailable) {
                 bagUnavailable = !captureBagContents(item, g_transferContents[slot]);
                 if (!bagUnavailable) {
@@ -1001,7 +1047,12 @@ static bool addItemWithCapture(Inventory* self, Item* item, int quantity, bool e
                 }
             }
         }
-        if ((g_blockXfer && decision == 1) || (capture && g_itemTransferCount == 256) || bagUnavailable) {
+        if ((g_blockXfer && decision == 1) || (capture && g_itemTransferCount == 256) ||
+            (needsVerdict && g_pendingVerdictCount == 256) || bagUnavailable) {
+            if (capture && edge.contentsSlot < 256) {
+                g_transferContents[edge.contentsSlot].clear();
+                g_transferContentsUsed[edge.contentsSlot] = false;
+            }
             __try {
                 char sid[48]; sid[0] = '\0';
                 GameData* gd = item->getGameData();
@@ -1044,10 +1095,16 @@ static bool addItemWithCapture(Inventory* self, Item* item, int quantity, bool e
     __try { ok = equip ? g_equipItemOrig(self,item) : g_tryAddItemOrig(self,item,quantity); }
     __finally { g_invVetoSuspend = saved; }
     if (ok && capture) {
+        if (needsVerdict) {
+            PendingVerdict& p = g_pendingVerdicts[g_pendingVerdictCount++];
+            p.token = ++g_verdictSerial;
+            memcpy(p.destination, edge.dst, sizeof(p.destination));
+            memcpy(p.stringID, edge.item.stringID, sizeof(p.stringID));
+            p.itemType = edge.item.itemType;
+            p.bag = isContainerItemType(edge.item.itemType) ? item : 0;
+            edge.verdictToken = p.token;
+        }
         g_itemTransfers[g_itemTransferCount++] = edge;
-        if (isContainerItemType(edge.item.itemType) &&
-            g_invOwnerClass(edge.src) != 1 && g_invOwnerClass(edge.dst) == 1)
-            g_unconfirmedBags[g_unconfirmedBagCount++] = item;
     } else if (capture && edge.contentsSlot < 256) {
         g_transferContents[edge.contentsSlot].clear();
         g_transferContentsUsed[edge.contentsSlot] = false;
@@ -1077,6 +1134,7 @@ DropItemFn g_dropItemOrig = 0;
 std::vector<ItemDropEdge> g_dropEdges;
 
 void __fastcall dropItem_hook(Inventory* self, Item* it) {
+    if (!g_invVetoSuspend && transferVerdictPending(self, it)) return;
     unsigned __int64 before=g_pendingRemovalStamp;
     g_dropItemOrig(self, it);
     // Retire only this drop, not another player's item still held on the cursor.
@@ -2430,7 +2488,9 @@ bool installXferBlockHook() {
 }
 
 void setBlockXfer(bool on)                    { g_blockXfer = on; }
-void setInvOwnerClassifier(InvOwnerClassFn fn) { g_invOwnerClass = fn; }
+void setInvOwnerClassifier(InvOwnerClassFn fn, InvAuthorityFn authority) {
+    g_invOwnerClass = fn; g_invAuthority = authority;
+}
 int inventoryOwnerClass(const unsigned int h[5]) {
     return g_invOwnerClass ? g_invOwnerClass(h) : 0;
 }

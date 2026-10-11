@@ -1711,7 +1711,10 @@ static void testFlushWorldStateContract() {
         CHECK("world-state dropped: " name, out.empty()); } while (0)
     WS_EMPTY("entity",      InboundEntity,      drainEntities);
     WS_EMPTY("event",       InboundEvent,       drainEvents);
-    WS_EMPTY("inv",         InboundInv,         drainInv);
+    { std::deque<InboundInv> snapshots; std::deque<InboundInvXferAck> verdicts;
+      in.drainInventory(snapshots, verdicts);
+      CHECK("world-state dropped: inv", snapshots.empty());
+      CHECK("world-state dropped: invXferAck", verdicts.empty()); }
     WS_EMPTY("worldItems",  InboundWorldItems,  drainWorldItems);
     WS_EMPTY("worldRemove", InboundWorldRemove, drainWorldRemove);
     WS_EMPTY("worldClaim",  InboundWorldClaim,  drainWorldClaim);
@@ -1742,7 +1745,6 @@ static void testFlushWorldStateContract() {
     WS_EMPTY("spawnInfo",   InboundSpawnInfo,   drainSpawnInfos);
     WS_EMPTY("camHint",     InboundCamHint,     drainCamHints);
     WS_EMPTY("cellClaim",   InboundCellClaim,   drainCellClaims);
-    WS_EMPTY("invXferAck",  InboundInvXferAck,  drainInvXferAcks);
     #undef WS_EMPTY
 
     // --- Every SESSION-PRESERVING queue must still hold its sentinel.

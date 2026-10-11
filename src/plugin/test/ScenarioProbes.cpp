@@ -986,13 +986,21 @@ private:
 // BOUND for a CONTROL-FLIP-claimed hand; end squad-size parity).
 class RecruitCtlScenario : public TimedScenario {
 public:
-    RecruitCtlScenario()
-        : TimedScenario("recruit_ctl", /*evidenceMs=*/0),
+    explicit RecruitCtlScenario(bool combat=false,bool alias=false,bool pending=false)
+        : TimedScenario(pending ? "recruit_handoff_pending" :
+            (alias ? "recruit_combat_alias" : (combat ? "recruit_combat" : "recruit_ctl")),
+            /*evidenceMs=*/0),
           lastGaitMs_(0), lastWalkMs_(0), altDir_(0),
           recruitDone_(false), recruitRes_(-9), subject_(0),
-          moveDone_(false), moveRes_(-9), baseN_(0), haveHome_(false) {
+          moveDone_(false), moveRes_(-9), baseN_(0), haveHome_(false),
+          combat_(combat), haveStriker_(false), attackIssued_(false), ownVictim_(false),
+          nativeTargetSamples_(0), lastCombatMs_(0), lastAttackMs_(0), bloodBase_(-1.0f),
+          damaged_(false), ownershipCorrect_(true), alias_(alias), pending_(pending),
+          aliasDone_(false), aliasRc_(-9), pendingWalk_(false), pendingMoving_(false) {
+        memset(striker_,0,sizeof(striker_));
         memset(recruitHand_, 0, sizeof(recruitHand_));
         memset(homeHand_, 0, sizeof(homeHand_));
+        memset(aliasHand_,0,sizeof(aliasHand_));
         for (int i = 0; i < MAX_BASE; ++i)
             for (int j = 0; j < 5; ++j) baseHands_[i][j] = 0;
     }
@@ -1018,7 +1026,8 @@ public:
         if (ctx.isHost && !recruitDone_ && ctx.elapsedMs >= RECRUIT_AT_MS) {
             recruitDone_ = true;
             unsigned int hb[5], ha[5];
-            recruitRes_ = engine::probeRecruit(ctx.gw, /*runtime=*/false, hb, ha);
+            recruitRes_ = engine::probeRecruit(ctx.gw, pending_, hb, ha,
+                                               600.0f);
             if (recruitRes_ == 1) {
                 memcpy(recruitHand_, ha, sizeof(recruitHand_));
                 subject_ = engine::resolveCharByHand(ha[3], ha[4], ha[0],
@@ -1031,19 +1040,37 @@ public:
                       ctx.elapsedMs);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
+        if (pending_ && ctx.isHost && subject_ && !moveDone_) {
+            // The SDK can defer player-roster admission past recruit(). Seed
+            // the real admitted body before asking the native move detector.
+            unsigned int live[5];
+            EntityState rows[MAX_SQUAD];
+            unsigned int n=engine::captureSquad(ctx.gw,false,rows,MAX_SQUAD);
+            if (subjectHand(live)) {
+                for (unsigned int i=0;i<n;++i) {
+                    unsigned int h[5];handFromEntity(rows[i],h);
+                    if (!sameHand(h,live)) continue;
+                    engine::pollSquadRoster(ctx.gw);
+                    moveDone_=true;doTransfer(ctx);
+                    break;
+                }
+            }
+        }
 
         // Join: discover the recruit as the NEW squad member (poll until found).
         if (!ctx.isHost && !subject_) findNewMember(ctx);
+        if (alias_ && !ctx.isHost && !aliasDone_ && ctx.elapsedMs>=12000)
+            createOwnedAliasTab(ctx);
 
         // 2) Gait sampling (both sides, ~4 Hz inside a walk window).
-        if (subject_ && (ctx.elapsedMs - lastGaitMs_ >= 250)) {
+        if (!combat_ && subject_ && (ctx.elapsedMs - lastGaitMs_ >= 250)) {
             int phase = phaseAt(ctx.elapsedMs);
             if (phase >= 0) { lastGaitMs_ = ctx.elapsedMs; logGait(ctx, phase); }
         }
 
         // 3) Owner walk-drive: the phase's OWNER re-issues a far run every 1s.
         //    Phase A owner = host; phase B owner = join.
-        if (subject_) {
+        if (!combat_ && subject_) {
             int phase = phaseAt(ctx.elapsedMs);
             bool owner = (phase == 0 && ctx.isHost) || (phase == 1 && !ctx.isHost);
             if (owner && (ctx.elapsedMs - lastWalkMs_ >= 1000)) {
@@ -1059,12 +1086,14 @@ public:
         //    the join (the reproduction of manual 2026-07-17: Squint). A
         //    join-authored move into its own tab does NOT flip (the author does
         //    not run rekeyPeerBody; the host receiver does not own the dest).
-        if (ctx.isHost && subject_ && !moveDone_ && ctx.elapsedMs >= MOVE_AT_MS) {
+        if (!pending_ && ctx.isHost && subject_ && !moveDone_ && ctx.elapsedMs >= MOVE_AT_MS) {
             moveDone_ = true;
             doTransfer(ctx);
         }
+        if (combat_ && subject_ && ctx.elapsedMs>=PHASE_B_FROM)
+            driveRecruitCombat(ctx);
 
-        if (ctx.elapsedMs >= DURATION_MS) {
+        if (ctx.elapsedMs >= (combat_ ? 65000UL : DURATION_MS)) {
             // Host: the recruit landed AND the transfer was authored (rc=1).
             // Join: it found the recruit (and, post-flip, owns + walks it in
             // phase B). The cross-machine gait + phantom verdict is
@@ -1072,6 +1101,11 @@ public:
             if (ctx.isHost) passed_ = (recruitRes_ == 1) && moveDone_ &&
                                       (moveRes_ == 1);
             else            passed_ = (subject_ != 0);
+            if (pending_) passed_=passed_ && ownershipCorrect_ && pendingMoving_ &&
+                (ctx.isHost ? attackIssued_ : ownVictim_ && nativeTargetSamples_>=2 && damaged_);
+            else if (combat_) passed_=(ctx.isHost ? passed_ && attackIssued_ :
+                ownVictim_ && nativeTargetSamples_>=2 && damaged_) && ownershipCorrect_;
+            if (alias_ && !ctx.isHost) passed_=passed_ && aliasRc_==1;
             return true;
         }
         return false;
@@ -1175,8 +1209,26 @@ private:
                 home = (int)i; break;
             }
         }
+        if (alias_) {
+            home=-1;
+            EntityState squad[MAX_SQUAD];
+            unsigned int n=engine::captureSquad(ctx.gw,false,squad,MAX_SQUAD);
+            for (unsigned int i=0;i<n;++i) {
+                unsigned int candidate[5];handFromEntity(squad[i],candidate);
+                if (engine::inventoryOwnerClass(candidate)!=2) continue;
+                bool known=false;
+                for (unsigned int j=0;j<baseN_;++j)
+                    if (candidate[1]==baseHands_[j][1] &&
+                        candidate[2]==baseHands_[j][2]) known=true;
+                if (!known) {
+                    memcpy(homeHand_,candidate,sizeof(homeHand_));
+                    home=(int)baseN_;break;
+                }
+            }
+        }
         if (home < 0) { moveRes_ = -7; homeLog(ctx, 0); return; }
-        memcpy(homeHand_, baseHands_[home], sizeof(homeHand_)); haveHome_ = true;
+        if (!alias_) memcpy(homeHand_, baseHands_[home], sizeof(homeHand_));
+        haveHome_ = true;
         unsigned int hb[5], ha[5];
         moveRes_ = engine::probeMoveSquadMember(ctx.gw, mh, homeHand_,
                                                 /*lever=*/1, hb, ha);
@@ -1197,6 +1249,116 @@ private:
                   moveRes_, ctx.elapsedMs);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
+    void createOwnedAliasTab(const ScenarioContext& ctx) {
+        aliasDone_=true;
+        int pick=-1;
+        for (unsigned int i=0;i<baseN_;++i)
+            if (engine::inventoryOwnerClass(baseHands_[i])==1 &&
+                (pick<0 || baseHands_[i][3]>baseHands_[pick][3])) pick=(int)i;
+        unsigned int before[5]={0},after[5]={0};
+        if (pick>=0) {
+            aliasRc_=engine::probeMoveSquadMember(ctx.gw,baseHands_[pick],0,0,
+                before,after);
+            if (aliasRc_==1) {
+                memcpy(baseHands_[pick],after,sizeof(after));
+                memcpy(aliasHand_,after,sizeof(after));
+            }
+        }
+        char b[176];_snprintf(b,sizeof(b)-1,
+            "SCENARIO CTL alias rc=%d before=%u,%u,%u,%u,%u after=%u,%u,%u,%u,%u",
+            aliasRc_,before[0],before[1],before[2],before[3],before[4],
+            after[0],after[1],after[2],after[3],after[4]);
+        b[sizeof(b)-1]=0;coop::logLine(b);
+    }
+    void driveRecruitCombat(const ScenarioContext& ctx) {
+        unsigned int victim[5];
+        if (!subjectHand(victim)) return;
+        if (alias_ && !ctx.isHost && aliasRc_==1 && ctx.elapsedMs>=14000 &&
+            engine::inventoryOwnerClass(aliasHand_)!=1) ownershipCorrect_=false;
+        if (pending_ && !ctx.isHost && ctx.elapsedMs>=32000 && ctx.elapsedMs<40000 &&
+            ctx.elapsedMs-lastWalkMs_>=1000) {
+            lastWalkMs_=ctx.elapsedMs;pendingWalk_=true;driveWalk(ctx);
+        }
+        if (pending_ && !ctx.isHost && pendingWalk_ && ctx.elapsedMs>=40000) {
+            pendingWalk_=false;engine::clearGoals(subject_);
+        }
+        if (pending_ && ctx.elapsedMs>=32000) {
+            bool moving=false;float speed=0;
+            if (engine::readMotion(subject_,&moving,&speed) && moving && speed>0.1f)
+                pendingMoving_=true;
+            if (ctx.elapsedMs-lastGaitMs_>=500) {
+                lastGaitMs_=ctx.elapsedMs;logGait(ctx,1);
+                float x=0,y=0,z=0;bool captured=subjectPos(ctx,&x,&y,&z);
+                float pelvis=-1;int idle=-1,crouch=-1,task=TASK_NONE;
+                engine::readPoseState(subject_,&pelvis,&idle,&crouch,&task);
+                char b[192];_snprintf(b,sizeof(b)-1,
+                    "SCENARIO PENDING BODY host=%d t=%lu captured=%d pos=%.1f,%.1f,%.1f bs=%u physics=%d nativeTask=%d",
+                    ctx.isHost,ctx.elapsedMs,captured,x,y,z,
+                    engine::readBodyState(subject_),engine::hasPhysicsBody(subject_),task);
+                b[sizeof(b)-1]=0;coop::logLine(b);
+            }
+        }
+        if (ctx.isHost && ctx.elapsedMs>=(pending_?40000UL:32000UL) &&
+            ctx.elapsedMs-lastAttackMs_>=2500) {
+            bool firstAttack=lastAttackMs_==0;lastAttackMs_=ctx.elapsedMs;
+            if (pending_ && firstAttack) {
+                float x=0,y=0,z=0;unsigned int fresh[1][5]={0};
+                if (subjectPos(ctx,&x,&y,&z) && engine::spawnRuntimeSquad(ctx.gw,1,fresh)==1) {
+                    Character* enemy=engine::resolveCharByHand(fresh[0][3],fresh[0][4],
+                        fresh[0][0],fresh[0][1],fresh[0][2]);
+                    EntityState place;memset(&place,0,sizeof(place));
+                    place.x=x+2;place.y=y;place.z=z+2;
+                    if (enemy && engine::applyRaw(enemy,place)) {
+                        engine::clearGoals(enemy);
+                        haveStriker_=engine::readObjectHand(
+                            reinterpret_cast<RootObject*>(enemy),striker_);
+                        // Nearby squad members defend the victim. Keep the real NPC
+                        // capable of landing an actual hit before they incapacitate it.
+                        if (haveStriker_) {
+                            unsigned int raised=engine::raiseAllStats(ctx.gw,striker_,90.0f);
+                            char line[128];_snprintf(line,sizeof(line)-1,
+                                "SCENARIO PENDING OPPONENT statsRaised=%u",raised);
+                            line[sizeof(line)-1]=0;coop::logLine(line);
+                        }
+                    }
+                }
+            } else if (!pending_ && !haveStriker_)
+                haveStriker_=engine::pickCombatVictim(ctx.gw,victim,0,striker_);
+            if (haveStriker_ && engine::orderAttackByHand(ctx.gw,striker_,victim))
+                attackIssued_=true;
+        }
+        if (ctx.elapsedMs-lastCombatMs_<500) return;
+        lastCombatMs_=ctx.elapsedMs;
+        int ownerClass=engine::inventoryOwnerClass(victim);
+        bool own=!ctx.isHost && ownerClass==1;
+        if (ctx.elapsedMs>=30000 && ownerClass!=(ctx.isHost?2:1))
+            ownershipCorrect_=false;
+        ownVictim_=ownVictim_ || own;
+        engine::MedicalRead medical;
+        bool read=engine::readMedicalByHand(victim,&medical) && medical.valid;
+        if (own && read) {
+            if (bloodBase_<0) bloodBase_=medical.blood;
+            if (medical.blood<bloodBase_-0.25f) damaged_=true;
+        }
+        unsigned int targets=0;
+        if (own) {
+            EntityState npcs[96];
+            unsigned int n=engine::captureNpcs(ctx.gw,npcs,96);
+            for (unsigned int i=0;i<n;++i) {
+                unsigned int target[5]={npcs[i].sType,npcs[i].sContainer,
+                    npcs[i].sContainerSerial,npcs[i].sIndex,npcs[i].sSerial};
+                if (coop::taskIsCombat(npcs[i].task) && sameHand(target,victim)) ++targets;
+            }
+            if (targets) ++nativeTargetSamples_;
+        }
+        char b[240];_snprintf(b,sizeof(b)-1,
+            "SCENARIO RECRUIT COMBAT host=%d t=%lu own=%d issued=%d targets=%u samples=%u blood=%.2f base=%.2f damaged=%d owner=%d authority=%d victim=%u,%u,%u,%u,%u",
+            ctx.isHost,ctx.elapsedMs,own,attackIssued_,targets,nativeTargetSamples_,
+            read?medical.blood:-1.0f,bloodBase_,damaged_,ownerClass,ownershipCorrect_,
+            victim[0],victim[1],victim[2],victim[3],victim[4]);
+        b[sizeof(b)-1]=0;coop::logLine(b);
+    }
+
 
     static const unsigned long RECRUIT_AT_MS = 8000;
     static const unsigned long PHASE_A_FROM  = 12000;
@@ -1221,6 +1383,100 @@ private:
     unsigned int  recruitHand_[5];
     unsigned int  homeHand_[5];
     bool          haveHome_;
+    bool combat_,haveStriker_,attackIssued_,ownVictim_;
+    unsigned int striker_[5],nativeTargetSamples_;
+    unsigned long lastCombatMs_,lastAttackMs_;
+    float bloodBase_;bool damaged_,ownershipCorrect_;
+    bool alias_,pending_,aliasDone_;
+    int aliasRc_;unsigned int aliasHand_[5];
+    bool pendingWalk_,pendingMoving_;
+};
+
+// A peer recruit can share the Host's native tab without owning that tab.
+// Returning a Host-authored member there must keep one Host pose author.
+class OwnTabReturnScenario : public TimedScenario {
+public:
+    OwnTabReturnScenario() : TimedScenario("own_tab_return", 0), subject_(0),
+        recruitRc_(-9), separateRc_(-9), returnRc_(-9), aliasFixture_(false),
+        authority_(true), movingSamples_(0), lastSample_(0), lastWalk_(0) {
+        memset(home_, 0, sizeof(home_));
+    }
+    virtual void onStart(const ScenarioContext& ctx) {
+        EntityState rows[48]; unsigned int n=engine::captureSquad(ctx.gw,false,rows,48);
+        int pick=-1;
+        for (unsigned int i=0;i<n;++i) {
+            unsigned int h[5];handFromEntity(rows[i],h);
+            if (engine::inventoryOwnerClass(h)!=(ctx.isHost?1:2)) continue;
+            if (pick<0 || rows[i].hIndex>rows[pick].hIndex) pick=(int)i;
+            if (ctx.isHost && !home_[0]) memcpy(home_,h,sizeof(home_));
+        }
+        if (pick>=0) subject_=engine::resolve(rows[pick]);
+    }
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!ctx.isHost && recruitRc_==-9 && ctx.elapsedMs>=8000) {
+            unsigned int before[5],after[5];
+            recruitRc_=engine::probeRecruit(ctx.gw,true,before,after,600.0f);
+            char b[160];_snprintf(b,sizeof(b)-1,
+                "SCENARIO OWN RETURN recruit rc=%d hand=%u,%u,%u,%u,%u",
+                recruitRc_,after[0],after[1],after[2],after[3],after[4]);
+            b[sizeof(b)-1]=0;coop::logLine(b);
+        }
+        if (ctx.isHost && !aliasFixture_ && ctx.elapsedMs>=9000) {
+            EntityState rows[48];unsigned int n=engine::captureSquad(ctx.gw,false,rows,48);
+            for (unsigned int i=0;i<n;++i) {
+                unsigned int h[5];handFromEntity(rows[i],h);
+                if (h[1]==home_[1] && h[2]==home_[2] &&
+                    engine::inventoryOwnerClass(h)==2) aliasFixture_=true;
+            }
+        }
+        unsigned int live[5];
+        bool have=subject_ && engine::readObjectHand(
+            reinterpret_cast<RootObject*>(subject_),live);
+        if (ctx.isHost && have && separateRc_==-9 && aliasFixture_ &&
+            ctx.elapsedMs>=12000) {
+            unsigned int before[5],after[5];
+            separateRc_=engine::probeMoveSquadMember(ctx.gw,live,0,0,before,after);
+        }
+        if (ctx.isHost && have && separateRc_==1 && returnRc_==-9 &&
+            ctx.elapsedMs>=24000) {
+            unsigned int before[5],after[5];
+            returnRc_=engine::probeMoveSquadMember(ctx.gw,live,home_,1,before,after);
+        }
+        if (have && ctx.elapsedMs>=28000) {
+            if (ctx.isHost && ctx.elapsedMs-lastWalk_>=3000) {
+                lastWalk_=ctx.elapsedMs;
+                EntityState rows[48];unsigned int n=engine::captureSquad(ctx.gw,false,rows,48);
+                for (unsigned int i=0;i<n;++i) {
+                    unsigned int h[5];handFromEntity(rows[i],h);
+                    if (memcmp(h,live,sizeof(h))==0) {
+                        engine::walkTo(subject_,rows[i].x+180,rows[i].y,rows[i].z,30);
+                        break;
+                    }
+                }
+            }
+            if (ctx.elapsedMs-lastSample_>=500) {
+                lastSample_=ctx.elapsedMs;
+                int owner=engine::inventoryOwnerClass(live);
+                if (owner!=(ctx.isHost?1:2)) authority_=false;
+                bool moving=false;float speed=0;
+                if (engine::readMotion(subject_,&moving,&speed) && moving && speed>0.1f)
+                    ++movingSamples_;
+                char b[192];_snprintf(b,sizeof(b)-1,
+                    "SCENARIO OWN RETURN host=%d t=%lu fixture=%d sep=%d back=%d owner=%d authority=%d moving=%u",
+                    ctx.isHost,ctx.elapsedMs,aliasFixture_,separateRc_,returnRc_,
+                    owner,authority_,movingSamples_);
+                b[sizeof(b)-1]=0;coop::logLine(b);
+            }
+        }
+        if (ctx.elapsedMs<40000) return false;
+        passed_=have && authority_ && movingSamples_>=3 &&
+            (ctx.isHost ? aliasFixture_ && separateRc_==1 && returnRc_==1 : recruitRc_==1);
+        return true;
+    }
+private:
+    Character* subject_;unsigned int home_[5];
+    int recruitRc_,separateRc_,returnRc_;bool aliasFixture_,authority_;
+    unsigned int movingSamples_;unsigned long lastSample_,lastWalk_;
 };
 
 // squad_probe (protocol 35 phase 0, probe tier; squadSync forced OFF) /
@@ -2428,8 +2684,12 @@ Scenario* makeProbeScenario(const std::string& name) {
     if (name == "recruit_probe") return new RecruitProbeScenario(true);
     if (name == "recruit_sync")  return new RecruitProbeScenario(false);
     if (name == "recruit_ctl")   return new RecruitCtlScenario();
+    if (name == "recruit_combat") return new RecruitCtlScenario(true);
+    if (name == "recruit_combat_alias") return new RecruitCtlScenario(true,true);
+    if (name == "recruit_handoff_pending") return new RecruitCtlScenario(true,false,true);
     if (name == "squad_probe")   return new SquadProbeScenario(true);
     if (name == "squad_sync")    return new SquadProbeScenario(false);
+    if (name == "own_tab_return") return new OwnTabReturnScenario;
     if (name == "faction_probe") return new FactionProbeScenario(true);
     if (name == "faction_sync")  return new FactionProbeScenario(false);
     if (name == "time_probe")    return new TimeProbeScenario(true);

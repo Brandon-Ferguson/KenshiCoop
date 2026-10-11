@@ -124,12 +124,16 @@ void Replicator::publishMedical(GameWorld* gw, NetLink& net, u32 ownerId) {
         for (std::map<Key, unsigned long>::const_iterator it = medNpc_.begin();
              it != medNpc_.end(); ++it) {
             if (ownHands_.find(it->first) != ownHands_.end()) continue;
+            // The host can temporarily stream a peer player's thrown transform;
+            // that does not grant ownership of the player's medical state.
+            if (pinPeer_.find(it->first) != pinPeer_.end()) continue;
             list.push_back(std::make_pair(it->first, true));
         }
     }
     for (unsigned int li = 0; li < list.size(); ++li) {
         const Key& k  = list[li].first;
         bool isNpc    = list[li].second;
+        const Key& wire = ownedWireKey(k);
         unsigned long minSendMs = isNpc ? NPC_MIN_SEND_MS : MIN_SEND_MS;
         unsigned int hand[5] = { k.t, k.c, k.cs, k.i, k.s };
         engine::MedicalRead mr;
@@ -157,8 +161,8 @@ void Replicator::publishMedical(GameWorld* gw, NetLink& net, u32 ownerId) {
                     memset(&ev, 0, sizeof(ev));
                     ev.type = (u8)PKT_EVENT; ev.event = evType;
                     ev.ownerId = ownerId;    ev.eventId = nextEventId_++;
-                    ev.sType = k.t; ev.sContainer = k.c; ev.sContainerSerial = k.cs;
-                    ev.sIndex = k.i; ev.sSerial = k.s;
+                    ev.sType = wire.t; ev.sContainer = wire.c; ev.sContainerSerial = wire.cs;
+                    ev.sIndex = wire.i; ev.sSerial = wire.s;
                     ev.arg = (f32)i; // RobotLimbs::Limb
                     net.queueEvent(ev);
                     char eb[160]; _snprintf(eb, sizeof(eb) - 1,
@@ -187,6 +191,10 @@ void Replicator::publishMedical(GameWorld* gw, NetLink& net, u32 ownerId) {
         bool changed = (h != mp.hash);
         mp.hash = h; mp.lastSendMs = now;
         MedicalPacket pkt;
+        if (&wire != &k) {
+            hand[0] = wire.t; hand[1] = wire.c; hand[2] = wire.cs;
+            hand[3] = wire.i; hand[4] = wire.s;
+        }
         fillMedicalPacket(pkt, hand, ownerId, mr);
         net.queueMedical(pkt);
         if (changed) { // periodic resends stay silent; changes are the signal
@@ -231,7 +239,7 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         const MedicalPacket& p = it->pkt;
         Key k; k.t = p.sType; k.c = p.sContainer; k.cs = p.sContainerSerial;
         k.i = p.sIndex; k.s = p.sSerial;
-        if (ownHands_.find(k) != ownHands_.end()) continue; // never write our own truth
+        if (ownHands_.count(k) || pinOwned_.count(k)) continue; // never write our own truth
         // Same host-hand -> local-instance remap the event channel needs: a
         // runtime-spawned NPC exists here as a proxy under a different hand, so
         // the direct resolve returned null and every vitals/limb update for
@@ -411,10 +419,10 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         const Key& k = it->first;
         MedRecv&   r = it->second;
         if (!r.have || (now - r.lastFwdMs) < FWD_THROTTLE_MS) continue;
-        if (ownHands_.find(k) != ownHands_.end()) continue;
-        unsigned int hand[5] = { k.t, k.c, k.cs, k.i, k.s };
+        if (ownHands_.count(k) || pinOwned_.count(k)) continue;
+        Character* treated = resolveEventChar(k);
         engine::MedicalRead mr;
-        if (!engine::readMedicalByHand(hand, &mr) || !mr.valid) continue;
+        if (!treated || !engine::readMedical(treated, &mr) || !mr.valid) continue;
         TreatmentPacket tp;
         memset(&tp, 0, sizeof(tp));
         bool rise = false;
@@ -458,10 +466,10 @@ void Replicator::applyTreatments(GameWorld* gw, Inbound& in) {
         // a squad member, or the host for a combat-scoped world NPC (medNpc_).
         // A delta for a body we aren't authoritative for is a partition error
         // (log-visible, ignored).
-        bool authority = ownHands_.find(k) != ownHands_.end() ||
-                         (streamNpcs_ && medNpc_.find(k) != medNpc_.end());
+        bool authority = ownHands_.count(k) || pinOwned_.count(k) ||
+                         (streamNpcs_ && medNpc_.count(k) && !pinPeer_.count(k));
         if (!authority) continue;
-        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        Character* c = resolveEventChar(k);
         if (!c) continue;
         int n = engine::applyBandageParts(c, p.partBand);
         char b[160]; _snprintf(b, sizeof(b) - 1,
@@ -517,7 +525,7 @@ void Replicator::applyCombatHits(GameWorld* gw, Inbound& in) {
         k.i = p.sIndex; k.s = p.sSerial;
         unsigned int hand[5] = { k.t, k.c, k.cs, k.i, k.s };
         Character* victim = engine::resolveCharByHand(hand[3], hand[4], hand[0], hand[1], hand[2]);
-        bool ours = ownHands_.find(k) != ownHands_.end();
+        bool ours = ownHands_.count(k) || pinOwned_.count(k);
         bool peerPc = victim && engine::isLocalPlayerChar(gw, victim);
         if (ours || peerPc) {
             // Hits on a player-squad body: owner medical is authoritative.
@@ -554,6 +562,7 @@ void Replicator::publishStats(GameWorld* gw, NetLink& net, u32 ownerId) {
     // local stats, so streaming them would be traffic without a consumer.
     for (std::set<Key>::const_iterator it = ownHands_.begin(); it != ownHands_.end(); ++it) {
         const Key& k = *it;
+        const Key& wire = ownedWireKey(k);
         unsigned int hand[5] = { k.t, k.c, k.cs, k.i, k.s };
         engine::StatsRead sr;
         if (!engine::readStatsByHand(hand, &sr) || !sr.valid) continue;
@@ -567,8 +576,8 @@ void Replicator::publishStats(GameWorld* gw, NetLink& net, u32 ownerId) {
         memset(&pkt, 0, sizeof(pkt));
         pkt.type    = (u8)PKT_STATS;
         pkt.ownerId = ownerId;
-        pkt.sType = k.t; pkt.sContainer = k.c; pkt.sContainerSerial = k.cs;
-        pkt.sIndex = k.i; pkt.sSerial = k.s;
+        pkt.sType = wire.t; pkt.sContainer = wire.c; pkt.sContainerSerial = wire.cs;
+        pkt.sIndex = wire.i; pkt.sSerial = wire.s;
         unsigned int n = sr.nStats; if (n > STATS_SLOT_MAX) n = STATS_SLOT_MAX;
         pkt.nStats = (u8)n;
         for (unsigned int i = 0; i < STATS_SLOT_MAX; ++i)
@@ -603,7 +612,7 @@ void Replicator::applyStats(GameWorld* gw, Inbound& in) {
         const StatsPacket& p = it->pkt;
         Key k; k.t = p.sType; k.c = p.sContainer; k.cs = p.sContainerSerial;
         k.i = p.sIndex; k.s = p.sSerial;
-        if (ownHands_.find(k) != ownHands_.end()) continue; // never write our own truth
+        if (ownHands_.count(k) || pinOwned_.count(k)) continue; // never write our own truth
         // Anchor for this peer's NICK. applySquadNicks can only rename a remote
         // player's body once it knows WHICH body is theirs (nickHand_), and the
         // sole thing that recorded that was a squad-claim event which a normal
@@ -621,7 +630,7 @@ void Replicator::applyStats(GameWorld* gw, Inbound& in) {
             unsigned int nh[5] = { k.t, k.c, k.cs, k.i, k.s };
             noteNickHand(p.ownerId, nh);
         }
-        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        Character* c = resolveEventChar(k);
         if (!c) continue;
         engine::StatsRead w;
         memset(&w, 0, sizeof(w));
@@ -912,14 +921,13 @@ void Replicator::publishDoors(const SyncContext& ctx) {
     GameWorld* gw = ctx.gw; NetLink& net = *ctx.net; u32 ownerId = ctx.localId;
     if (!doorSync_) return;
     const unsigned long SAMPLE_MS = tuning_.doorSampleMs;  // doors move in clicks; 1 Hz is plenty
-    const unsigned long RESEND_MS = tuning_.doorResendMs;  // safety resend for rows we ever sent
     unsigned long now = nowMs();
     if (!sync::gateSampleDue(now, doorSampleMs_, SAMPLE_MS)) return;
     doorSampleMs_ = now;
 
-    const unsigned int MAX_DOORS = 64;
+    const unsigned int MAX_DOORS = 128; // doors plus shared-inventory container locks
     static engine::DoorRead rows[MAX_DOORS]; // main-thread only
-    unsigned int n = engine::enumDoorsNear(gw, 100.0f, rows, MAX_DOORS);
+    unsigned int n = engine::enumDoorsNear(gw, 400.0f, rows, MAX_DOORS, false);
     for (unsigned int i = 0; i < n; ++i) {
         const engine::DoorRead& r = rows[i];
         // Protocol 28 partition: doors on SESSION-PLACED buildings (ours or
@@ -932,29 +940,32 @@ void Replicator::publishDoors(const SyncContext& ctx) {
                 mintByLocal_.find(pk) != mintByLocal_.end())
                 continue;
         }
-        Key k; k.t = r.hand[0]; k.c = r.hand[1]; k.cs = r.hand[2];
-        k.i = r.hand[3]; k.s = r.hand[4];
+        Key local; local.t = r.hand[0]; local.c = r.hand[1]; local.cs = r.hand[2];
+        local.i = r.hand[3]; local.s = r.hand[4];
+        Key k = local;
+        std::map<Key, Key>::const_iterator minted = mintByLocal_.find(local);
+        if (minted != mintByLocal_.end()) k = minted->second;
+        else if (!ctx.isHost) k = invWireKeyForLocal(local);
         DoorRow& dr = doorRows_[k];
-        if (!dr.seeded) {
-            // Both clients load the same save, so the baseline is shared: seed
-            // silently and stream only genuine mid-session movement.
-            dr.seeded = true; dr.knownOpen = r.open; dr.knownLocked = r.locked;
-            continue;
-        }
+        if (dr.pending) continue; // do not echo an unapplied remote state
         bool changed = (r.open != dr.knownOpen) || (r.locked != dr.knownLocked);
-        // Doors seed their baseline silently above, so a never-sent row holds
-        // (resendUnsent = false); only a real change or a post-send safety
-        // resend crosses. No burst throttle - the 1 Hz sample gate paces it.
-        if (!sync::gateShouldSend(changed, now, dr.lastSendMs, /*minSendMs*/ 0,
-                                  RESEND_MS, /*resendUnsent*/ false))
-            continue;
+        if (!dr.seeded) {
+            dr.seeded = true; dr.knownOpen = r.open; dr.knownLocked = r.locked;
+            if (!ctx.isHost) continue; // only the host authors the initial snapshot
+            changed = true;
+        }
+        // Reliable changes need no heartbeat. A stale resend from either
+        // writer can undo the other writer's newer native lock operation.
+        // Zero lastSendMs requests the host's initial/reconnect snapshot.
+        if (!changed && !(ctx.isHost && dr.lastSendMs == 0)) continue;
         dr.knownOpen = r.open; dr.knownLocked = r.locked; dr.lastSendMs = now;
         DoorPacket pkt;
         memset(&pkt, 0, sizeof(pkt));
         pkt.type    = (u8)PKT_DOOR;
         pkt.ownerId = ownerId;
         pkt.seq     = doorSeqOut_++;
-        for (unsigned int h = 0; h < 5; ++h) pkt.hand[h] = r.hand[h];
+        pkt.hand[0] = k.t; pkt.hand[1] = k.c; pkt.hand[2] = k.cs;
+        pkt.hand[3] = k.i; pkt.hand[4] = k.s;
         pkt.open    = (u8)(r.open ? 1 : 0);
         pkt.locked  = (u8)(r.locked ? 1 : 0);
         net.queueDoor(pkt);
@@ -973,32 +984,54 @@ void Replicator::applyDoors(const SyncContext& ctx) {
     Inbound& in = *ctx.in;
     std::deque<InboundDoor> got;
     in.drainDoor(got);
-    if (got.empty()) return;
     if (!doorSync_) return;
     for (std::deque<InboundDoor>::iterator it = got.begin(); it != got.end(); ++it) {
         const DoorPacket& p = it->pkt;
+        if (p.ownerId >= MAX_PLAYERS) continue;
         Key k; k.t = p.hand[0]; k.c = p.hand[1]; k.cs = p.hand[2];
         k.i = p.hand[3]; k.s = p.hand[4];
         DoorRow& dr = doorRows_[k];
-        if (!sync::gateSeqAccept(dr.seqSeen, p.seq)) continue; // stale/dup row
-        dr.seqSeen = p.seq;
-        // Updating the baseline FIRST is the echo guard: the local change this
-        // write causes must not be re-detected as ours next sample.
+        if (!sync::gateSeqAccept(dr.seqSeen[p.ownerId], p.seq)) continue;
+        dr.seqSeen[p.ownerId] = p.seq;
         dr.knownOpen = (int)p.open; dr.knownLocked = (int)p.locked;
-        dr.seeded = true;
+        dr.pendingSeq = p.seq; dr.seeded = true; dr.pending = true;
+    }
+    for (std::map<Key, DoorRow>::iterator it = doorRows_.begin(); it != doorRows_.end(); ++it) {
+        DoorRow& dr = it->second;
+        if (!dr.pending) continue;
+        const Key& k = it->first;
+        unsigned int hand[5] = { k.t, k.c, k.cs, k.i, k.s };
+        if (!localHandForFixtureKey(k, hand)) {
+            std::map<Key, OwnBuild>::const_iterator own = ownBuilds_.find(k);
+            std::map<Key, PeerBuild>::const_iterator peer = peerBuilds_.find(k);
+            if (own != ownBuilds_.end()) {
+                if (own->second.removed) { dr.pending = false; continue; }
+                memcpy(hand, own->second.hand, sizeof(hand));
+            } else if (peer != peerBuilds_.end()) {
+                if (peer->second.removed) { dr.pending = false; continue; }
+                if (peer->second.minted != 1) continue;
+                memcpy(hand, peer->second.localHand, sizeof(hand));
+            }
+        }
         engine::DoorRead cur;
-        if (!engine::readDoorByHand(p.hand, &cur))
-            continue; // out-of-interest or runtime door - accepted edge
-        bool lockMoves = cur.hasLock && (cur.locked != (int)p.locked);
-        if (cur.open == (int)p.open && !lockMoves)
-            continue; // already converged (resend or echo)
-        bool ok = engine::writeDoorByHand(p.hand, (int)p.open,
-                                          cur.hasLock ? (int)p.locked : -1, 0);
+        if (!engine::readDoorByHand(hand, &cur)) continue; // retained until streamed in
+        bool openMoves = cur.state >= 0 && cur.open != dr.knownOpen;
+        bool lockMoves = cur.hasLock && cur.locked != dr.knownLocked;
+        if (!openMoves && !lockMoves) {
+            dr.pending = false;
+            continue;
+        }
+        engine::DoorRead after;
+        bool ok = engine::writeDoorByHand(hand, cur.state >= 0 ? dr.knownOpen : -1,
+                                          cur.hasLock ? dr.knownLocked : -1, &after);
+        if (ok && (after.state < 0 || after.open == dr.knownOpen) &&
+            (!after.hasLock || after.locked == dr.knownLocked))
+            dr.pending = false;
         char b[176];
         _snprintf(b, sizeof(b) - 1,
                   "[door] RECV hand=%u.%u.%u.%u.%u open=%u locked=%u was=%d/%d ok=%d seq=%u",
-                  p.hand[0], p.hand[1], p.hand[2], p.hand[3], p.hand[4],
-                  p.open, p.locked, cur.open, cur.locked, ok ? 1 : 0, p.seq);
+                  k.t, k.c, k.cs, k.i, k.s, (unsigned)dr.knownOpen,
+                  (unsigned)dr.knownLocked, cur.open, cur.locked, ok ? 1 : 0, dr.pendingSeq);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
 }
@@ -1945,8 +1978,10 @@ void Replicator::onPeerConnected(NetLink& net, u32 ownerId) {
          it != facRows_.end(); ++it)
         if (it->second.lastSendMs != 0) { it->second.lastSendMs = 1; ++nFac; }
     for (std::map<Key, DoorRow>::iterator it = doorRows_.begin();
-         it != doorRows_.end(); ++it)
-        if (it->second.lastSendMs != 0) { it->second.lastSendMs = 1; ++nDoor; }
+         it != doorRows_.end(); ++it) {
+        memset(it->second.seqSeen, 0, sizeof(it->second.seqSeen));
+        it->second.lastSendMs = 0; ++nDoor; // host replays current locks on next sample
+    }
     for (std::map<std::pair<Key, int>, BdoorRow>::iterator it = bdoorRows_.begin();
          it != bdoorRows_.end(); ++it)
         if (it->second.lastSendMs != 0) { it->second.lastSendMs = 1; ++nBdoor; }
@@ -2150,6 +2185,12 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
     engine::SquadMoveEdge edges[8];
     unsigned int n = engine::drainSquadMoveEdges(edges, 8);
     unsigned long nowSq = nowMs();
+    for (std::map<Key, std::pair<Key, unsigned long> >::iterator echo = moveEcho_.begin();
+         echo != moveEcho_.end(); ) {
+        if (nowSq - echo->second.second > (unsigned long)SQUAD_ECHO_MS)
+            moveEcho_.erase(echo++);
+        else ++echo;
+    }
     // Retire hands we already announced as gone (bounded; see exitedOwn_).
     for (std::map<Key, unsigned long>::iterator xt = exitedOwn_.begin();
          xt != exitedOwn_.end(); ) {
@@ -2159,12 +2200,14 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
     for (unsigned int i = 0; i < n; ++i) {
         // Our own insertPeerMember re-container, not a user action: publishing
         // it would claim the peer's character as ours (see moveEcho_).
-        u32 serial = edges[i].before[4] ? edges[i].before[4] : edges[i].after[4];
-        std::map<u32, unsigned long>::iterator me = moveEcho_.find(serial);
+        Key ok; ok.t = edges[i].before[0]; ok.c = edges[i].before[1];
+        ok.cs = edges[i].before[2]; ok.i = edges[i].before[3]; ok.s = edges[i].before[4];
+        Key nk; nk.t = edges[i].after[0]; nk.c = edges[i].after[1];
+        nk.cs = edges[i].after[2]; nk.i = edges[i].after[3]; nk.s = edges[i].after[4];
+        std::map<Key, std::pair<Key, unsigned long> >::iterator me = moveEcho_.find(ok);
         if (me != moveEcho_.end()) {
-            bool fresh = (nowSq - me->second) <= (unsigned long)SQUAD_ECHO_MS;
-            moveEcho_.erase(me);
-            if (fresh) {
+            if (me->second.first == nk) {
+                moveEcho_.erase(me);
                 char eb[176]; _snprintf(eb, sizeof(eb) - 1,
                     "[squad] EVT skip echo old=%u,%u,%u,%u,%u new=%u,%u,%u,%u,%u",
                     edges[i].before[0], edges[i].before[1], edges[i].before[2],
@@ -2175,15 +2218,7 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
                 continue;
             }
         }
-        Key ok; ok.t = edges[i].before[0]; ok.c = edges[i].before[1];
-        ok.cs = edges[i].before[2]; ok.i = edges[i].before[3]; ok.s = edges[i].before[4];
-        Key nk; nk.t = edges[i].after[0]; nk.c = edges[i].after[1];
-        nk.cs = edges[i].after[2]; nk.i = edges[i].after[3]; nk.s = edges[i].after[4];
         bool exited = (nk.t | nk.c | nk.cs | nk.i | nk.s) == 0;
-        if (publishAsWire_.find(nk) != publishAsWire_.end()) {
-            moveEcho_[serial] = nowSq;
-            continue;
-        }
         // A peer-owned body (another player's squad). Dismissing or dragging
         // it locally must NOT publish as our move — that dumps them into
         // player 1's tab and/or player 2's tab. Put them back in the peer tab.
@@ -2192,6 +2227,9 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
             if (!pc && !exited)
                 pc = engine::resolveCharByHand(nk.i, nk.s, nk.t, nk.c, nk.cs);
             if (pc) {
+                unsigned int nativeBefore[5];
+                bool haveBefore = engine::readObjectHand(
+                    reinterpret_cast<RootObject*>(pc), nativeBefore);
                 unsigned int th[5];
                 bool haveT = false;
                 Character* pcs[80];
@@ -2217,9 +2255,13 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
                     Key lk; lk.t = lh[0]; lk.c = lh[1]; lk.cs = lh[2];
                     lk.i = lh[3]; lk.s = lh[4];
                     pinPeer_.insert(lk);
-                    moveEcho_[lk.s] = nowSq;
+                    if (haveBefore) {
+                        Key before; before.t = nativeBefore[0]; before.c = nativeBefore[1];
+                        before.cs = nativeBefore[2]; before.i = nativeBefore[3];
+                        before.s = nativeBefore[4];
+                        if (!(before == lk)) moveEcho_[before] = std::make_pair(lk, nowSq);
+                    }
                 }
-                moveEcho_[serial] = nowSq;
             }
             char sb[128];
             _snprintf(sb, sizeof(sb) - 1,
@@ -2229,30 +2271,63 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
             coop::logLine(sb);
             continue;
         }
+        Key wireOld = ok, wireNew = nk;
+        std::map<Key, Key>::const_iterator oldWire = publishAsWire_.find(ok);
+        if (oldWire != publishAsWire_.end()) wireOld = oldWire->second;
         // The old hand is dead either way - drop any pin it carried (a moved
         // recruit / a re-moved member must not leave a stale claim behind).
         pinOwned_.erase(ok);
         pinPeer_.erase(ok);
-        // Pin ownership BEFORE the wire (the recruit pattern): every edge
-        // polled from OUR roster is OUR user's action, so the new hand
-        // publishes from this side no matter which rank its container latched
-        // to (an appended tab inherits our ownership through this pin).
-        if (!exited) pinOwned_.insert(nk);
-        // ...and if it LEFT, retire the hand so the peer's in-flight tail cannot
-        // turn our departed body into a driven one (see exitedOwn_).
-        else exitedOwn_[ok] = nowSq;
+        pinOwned_.erase(wireOld);
+        pinPeer_.erase(wireOld);
+        publishAsWire_.erase(ok);
+        // A move into an existing peer-owned tab hands control to that peer.
+        // Otherwise both sides publish vitals and independently simulate combat.
+        // A newly appended/unranked tab still inherits the author's ownership.
+        ownHands_.erase(ok);
+        if (!exited) {
+            std::pair<u32, u32> destTab(nk.c, nk.cs);
+            std::map<std::pair<u32, u32>, unsigned int>::const_iterator rit =
+                tabRank_.find(destTab);
+            bool toPeer = rit != tabRank_.end() && !ownsTab(destTab, rit->second);
+            if (toPeer) {
+                // Membership aliases do not decide ownership of mixed tabs.
+                for (std::map<std::pair<u32, u32>, std::pair<u32, u32> >::const_iterator
+                     alias = peerTabAlias_.begin(); alias != peerTabAlias_.end(); ++alias) {
+                    if (alias->second != destTab) continue;
+                    wireNew.c = alias->first.first;
+                    wireNew.cs = alias->first.second;
+                    break;
+                }
+                pinOwned_.erase(nk);
+                ownHands_.erase(nk);
+                pinPeer_.insert(nk);
+                pinPeer_.insert(wireNew);
+                Character* moved = engine::resolveCharByHand(nk.i, nk.s,
+                    nk.t, nk.c, nk.cs);
+                if (moved) canonicalOf_[moved] = wireNew;
+                if (moved && (wireNew.c != nk.c || wireNew.cs != nk.cs))
+                    proxyByKey_[wireNew] = moved;
+            } else {
+                pinOwned_.insert(nk);
+                pinPeer_.erase(nk);
+            }
+        } else {
+            // Departed bodies must not be driven by an in-flight stream tail.
+            exitedOwn_[ok] = nowSq;
+        }
         EventPacket ev;
         memset(&ev, 0, sizeof(ev));
         ev.type    = (u8)PKT_EVENT;
         ev.event   = EVT_SQUAD_MOVE;
         ev.ownerId = ownerId;
         ev.eventId = nextEventId_++;
-        ev.sType = edges[i].before[0]; ev.sContainer = edges[i].before[1];
-        ev.sContainerSerial = edges[i].before[2];
-        ev.sIndex = edges[i].before[3]; ev.sSerial = edges[i].before[4];
-        ev.aType = edges[i].after[0]; ev.aContainer = edges[i].after[1];
-        ev.aContainerSerial = edges[i].after[2];
-        ev.aIndex = edges[i].after[3]; ev.aSerial = edges[i].after[4];
+        ev.sType = wireOld.t; ev.sContainer = wireOld.c;
+        ev.sContainerSerial = wireOld.cs;
+        ev.sIndex = wireOld.i; ev.sSerial = wireOld.s;
+        ev.aType = wireNew.t; ev.aContainer = wireNew.c;
+        ev.aContainerSerial = wireNew.cs;
+        ev.aIndex = wireNew.i; ev.aSerial = wireNew.s;
         net.queueEvent(ev);
         char b[176];
         _snprintf(b, sizeof(b) - 1,
@@ -2358,8 +2433,8 @@ void Replicator::publishStealth(GameWorld* gw, NetLink& net, u32 ownerId) {
     // cannot compute is what OUR world's detection says about ITS characters.
     for (std::map<Key, Driven>::iterator it = targets_.begin(); it != targets_.end(); ++it) {
         const Key& k = it->first;
-        if (ownHands_.find(k) != ownHands_.end()) continue;
-        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        if (ownHands_.count(k) || pinOwned_.count(k)) continue;
+        Character* c = resolveEventChar(k);
         if (!c) continue;
         engine::StealthRead sr;
         if (!engine::readStealth(c, &sr) || !sr.valid) continue;
@@ -2432,8 +2507,8 @@ void Replicator::applyStealthFeedback(GameWorld* gw, Inbound& in) {
         // up the OWNER's indicators. A driven copy already has its own local
         // map (it IS the detection authority's copy elsewhere) - writing to it
         // would double-count.
-        if (ownHands_.find(k) == ownHands_.end()) continue;
-        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        if (!ownHands_.count(k) && !pinOwned_.count(k)) continue;
+        Character* c = resolveEventChar(k);
         if (!c) continue;
         unsigned int applied = 0;
         unsigned int n = p.nSeers; if (n > STEALTH_SEER_MAX) n = STEALTH_SEER_MAX;

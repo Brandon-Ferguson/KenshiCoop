@@ -965,6 +965,7 @@ private:
     bool passed_;
 };
 
+
 } // namespace
 
 Scenario* makeNpcScenario(const std::string& name) {

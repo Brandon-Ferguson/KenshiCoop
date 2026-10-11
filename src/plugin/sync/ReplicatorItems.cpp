@@ -22,10 +22,16 @@ Replicator::Key Replicator::keyForInvLocalHand(const unsigned int hand[5]) const
 }
 
 Character* Replicator::resolveEventChar(const Key& k) const {
-    Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
-    if (c) return c;
+    for (std::map<Key, Key>::const_iterator owned = publishAsWire_.begin();
+         owned != publishAsWire_.end(); ++owned) {
+        if ((owned->second < k) || (k < owned->second)) continue;
+        const Key& native = owned->first;
+        return engine::resolveCharByHand(native.i, native.s,
+            native.t, native.c, native.cs);
+    }
     std::map<Key, Character*>::const_iterator pit = proxyByKey_.find(k);
-    if (pit == proxyByKey_.end() || !pit->second) return 0;
+    if (pit == proxyByKey_.end() || !pit->second)
+        return engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
     // Re-ask the engine instead of handing back the cached pointer, and use the
     // TYPED hand API so the two legacy component orders cannot be swapped here -
     // getting that wrong is a silent no-op, which is the failure mode this whole
@@ -80,6 +86,104 @@ bool Replicator::resolveInvWireHand(const Key& k,unsigned int out[5]) const {
                resolveInvLocalHand(keyForInvLocalHand(peer->second.localHand),out);
     if (fixtureMap_.count(k)) return localHandForFixtureKey(k,out);
     return !renamed && resolveInvLocalHand(k,out);
+}
+
+void Replicator::inventorySnapshotIdentity(const Key& local, u32 wireKey[5], u8& keyKind) const {
+    Key wire = local;
+    keyKind = ownBuilds_.count(local) ? 1 : 0;
+    std::map<Key, Key>::const_iterator mint = mintByLocal_.find(local);
+    if (mint != mintByLocal_.end()) { keyKind = 1; wire = mint->second; }
+    std::map<Key, Key>::const_iterator claim = publishAsWire_.find(local);
+    if (claim != publishAsWire_.end()) wire = claim->second;
+    wireKey[0] = wire.t; wireKey[1] = wire.c; wireKey[2] = wire.cs;
+    wireKey[3] = wire.i; wireKey[4] = wire.s;
+}
+
+bool Replicator::inventoryCommitPending(const unsigned int hand[5]) const {
+    // An unavailable native inventory is unknown, not an authoritative empty state.
+    if (!engine::containerInventoryAvailable(hand)) return true;
+    // A cursor lifetime does not depend on which inventory panel is visible.
+    if (engine::itemTransferPending(hand)) return true;
+    Key local = keyForInvLocalHand(hand);
+    if (wdPendingDrop(local)) return true;
+    for (std::map<u32,XferOut>::const_iterator x=xferOut_.begin();x!=xferOut_.end();++x)
+        if ((!x->second.srcPeer && !(x->second.src < local) && !(local < x->second.src)) ||
+            (!x->second.dstPeer && !(x->second.dst < local) && !(local < x->second.dst)))
+            return true;
+    return false;
+}
+
+void Replicator::queueXferVerdict(GameWorld* gw, NetLink& net, const InvXferPacket& intent,
+                                  const InboundInvXferAck& result) {
+    unsigned int hand[5];
+    Key source; source.t = intent.sType; source.c = intent.sContainer;
+    source.cs = intent.sContainerSerial; source.i = intent.sIndex; source.s = intent.sSerial;
+    if (!resolveInvWireHand(source, hand) || !ownsInventoryLocalHand(hand)) {
+        Key destination; destination.t = intent.dType; destination.c = intent.dContainer;
+        destination.cs = intent.dContainerSerial; destination.i = intent.dIndex;
+        destination.s = intent.dSerial;
+        if (!resolveInvWireHand(destination, hand) || !ownsInventoryLocalHand(hand)) return;
+    }
+    InvItemEntry items[INV_ITEMS_MAX]; bool truncated = false;
+    unsigned int count = 0;
+    bool unsettled = inventoryCommitPending(hand);
+    if (unsettled) {
+        // The verdict must still leave: waiting for another outgoing verdict here
+        // would deadlock simultaneous trades. An empty INCOMPLETE description says
+        // "unknown", never "gone", and exposes no other speculative item.
+        truncated = true;
+    } else {
+        count = engine::captureContainerContents(gw, hand, items, INV_ITEMS_MAX,
+                                                 0, &truncated, true);
+    }
+    u32 wireKey[5]; u8 keyKind;
+    inventorySnapshotIdentity(keyForInvLocalHand(hand), wireKey, keyKind);
+    InvSnapshotHeader snapshot; memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.type = (u8)PKT_INV_SNAPSHOT; snapshot.ownerId = result.pkt.ownerId;
+    snapshot.keyKind = keyKind; snapshot.flags = truncated ? INV_FLAG_TRUNCATED : 0;
+    snapshot.cType = wireKey[0]; snapshot.cContainer = wireKey[1];
+    snapshot.cContainerSerial = wireKey[2]; snapshot.cIndex = wireKey[3];
+    snapshot.cSerial = wireKey[4]; snapshot.count = (u8)count;
+    if (truncated) {
+        Key canonical; canonical.t = snapshot.cType; canonical.c = snapshot.cContainer;
+        canonical.cs = snapshot.cContainerSerial; canonical.i = snapshot.cIndex;
+        canonical.s = snapshot.cSerial;
+        deferredInvCommits_.insert(canonical);
+    }
+    net.queueInvXferAck(result.pkt, result.contents, snapshot, items);
+}
+
+void Replicator::publishDeferredInventoryCommits(GameWorld* gw, NetLink& net, u8 localOwnerId) {
+    if (deferredInvCommits_.empty()) return;
+    InvItemEntry items[INV_ITEMS_MAX];
+    unsigned long now = nowMs();
+    for (std::set<Key>::iterator it = deferredInvCommits_.begin();
+         it != deferredInvCommits_.end();) {
+        unsigned int hand[5];
+        if (!resolveInvWireHand(*it, hand)) { ++it; continue; }
+        if (!ownsInventoryLocalHand(hand)) { deferredInvCommits_.erase(it++); continue; }
+        if (inventoryCommitPending(hand)) { ++it; continue; }
+        Key local = keyForInvLocalHand(hand);
+        u32 wireKey[5]; u8 keyKind;
+        inventorySnapshotIdentity(local, wireKey, keyKind);
+        u32 hash = 0;
+        bool truncated = false;
+        unsigned int count = engine::captureContainerContents(gw, hand, items, INV_ITEMS_MAX,
+                                                             &hash, &truncated, true);
+        // An incomplete native capture cannot discharge the full-commit obligation.
+        if (truncated) { ++it; continue; }
+        net.queueInvSnapshot(localOwnerId, keyKind, wireKey, items, count, (u8)0);
+        std::map<Key, InvPub>::iterator pub = invPub_.find(local);
+        if (pub != invPub_.end()) {
+            unsigned int units = 0;
+            for (unsigned int i = 0; i < count; ++i)
+                units += (items[i].quantity < 1) ? 1u : (unsigned int)items[i].quantity;
+            pub->second.hash = hash; pub->second.lastSendMs = now;
+            pub->second.pendingHash = hash; pub->second.pendingSince = now;
+            pub->second.lastSentN = count; pub->second.lastSentUnits = units;
+        }
+        deferredInvCommits_.erase(it++);
+    }
 }
 
 void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
@@ -164,17 +268,7 @@ void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
     for (std::set<Key>::iterator it = owned.begin();
          it != owned.end(); ++it) {
         unsigned int cHand[5] = { it->t, it->c, it->cs, it->i, it->s };
-        bool unsettled = false;
-        for (std::map<u32,XferOut>::const_iterator x=xferOut_.begin();x!=xferOut_.end();++x)
-            if ((!x->second.srcPeer && !(x->second.src < *it) && !(*it < x->second.src)) ||
-                (!x->second.dstPeer && !(x->second.dst < *it) && !(*it < x->second.dst))) {
-                unsettled = true; break;
-            }
-        if (unsettled) continue;
-        if (engine::containerGuiOpen(gw,cHand) && engine::itemTransferPending(cHand)) continue;
-        // Skip until the container actually resolves here (post-load it may not yet),
-        // so we never blast a spurious "empty" snapshot that would wipe baked contents.
-        if (!engine::containerInventoryAvailable(cHand)) continue;
+        if (inventoryCommitPending(cHand)) continue;
         // Do NOT publish a container whose incoming snapshot we have not applied
         // yet. While an inventory panel is open here the apply is deferred (see
         // applyInventories), so this copy is knowingly behind the peer's - and
@@ -260,27 +354,10 @@ void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
             continue;
         }
-        // Protocol 34 wire identity: a session-placed building rides its
-        // protocol-27 placer key (own placement = our hand; a minted proxy =
-        // the reverse map). Characters / baked containers stay raw (kind 0).
-        u8 keyKind = 0;
-        u32 wireKey[5] = { it->t, it->c, it->cs, it->i, it->s };
-        if (ownBuilds_.find(*it) != ownBuilds_.end()) {
-            keyKind = 1;
-        } else {
-            std::map<Key, Key>::iterator mit = mintByLocal_.find(*it);
-            if (mit != mintByLocal_.end()) {
-                keyKind = 1;
-                wireKey[0] = mit->second.t; wireKey[1] = mit->second.c;
-                wireKey[2] = mit->second.cs; wireKey[3] = mit->second.i;
-                wireKey[4] = mit->second.s;
-            }
-        }
-        std::map<Key,Key>::const_iterator claim=publishAsWire_.find(*it);
-        if (claim!=publishAsWire_.end()) {
-            wireKey[0]=claim->second.t; wireKey[1]=claim->second.c; wireKey[2]=claim->second.cs;
-            wireKey[3]=claim->second.i; wireKey[4]=claim->second.s;
-        }
+        // Use the same authority identity for periodic snapshots and transfer commits.
+        u8 keyKind;
+        u32 wireKey[5];
+        inventorySnapshotIdentity(*it, wireKey, keyKind);
         u8 sflags = trunc ? INV_FLAG_TRUNCATED : (u8)0;
         net.queueInvSnapshot(ownerId, keyKind, wireKey, items, n, sflags);
         pub.hash = hash; pub.lastSendMs = now; pub.lastSentN = n; pub.lastSentUnits = units;
@@ -363,7 +440,7 @@ void Replicator::applyInventories(GameWorld* gw) {
             guiDefer_.erase(k);
             guiDeferSaid_.erase(k);
         }
-        if (engine::containerGuiOpen(gw,cHand) && engine::itemTransferPending(cHand)) {
+        if (engine::itemTransferPending(cHand)) {
             it->second.dirty=true; continue;
         }
         // A stale parent-only list must never clear a newly transferred bag's contents.
@@ -834,6 +911,10 @@ void Replicator::detectAndPublishWeaponDrops(GameWorld* gw, NetLink& net, u32 ow
     for (std::set<Key>::iterator it = ownHands_.begin(); it != ownHands_.end(); ++it) {
         unsigned int cHand[5] = { it->t, it->c, it->cs, it->i, it->s };
         if (engine::resolveObjectByHand(cHand) == 0) continue;
+        // A detached cursor item is not a ground drop. Preserve the census until
+        // native add/drop/destroy settles the removal; a completed trade is then
+        // absorbed by its transfer suppression before this census runs.
+        if (engine::itemTransferPending(cHand)) continue;
         unsigned int n = engine::captureContainerContents(gw, cHand, items, INV_ITEMS_MAX, 0);
         // Build this character's CURRENT GEAR census (copies per "sid", with provenance + type).
         std::map<std::string, WCensusItem> cur;
@@ -1652,13 +1733,14 @@ void Replicator::detectAndPublishTransfers(GameWorld* gw, NetLink& net, u32 owne
         f.dst = keyForInvLocalHand(edges[i].dst);
         f.key = XKey(std::string(edges[i].item.stringID), edges[i].item.itemType);
         f.qty = edges[i].item.quantity;
-        if (f.qty <= 0) { engine::finishTransferredBag(edges[i].transferredItem); continue; }
-        bool srcOwn = ownedContainers_.count(f.src) != 0 || ownHands_.count(f.src) != 0
-                   || censusContainers_.count(f.src) != 0 ||
-                      (isHostRole() && ownerClassForHand(edges[i].src) == 0);
-        bool dstOwn = ownedContainers_.count(f.dst) != 0 || ownHands_.count(f.dst) != 0
-                   || censusContainers_.count(f.dst) != 0 ||
-                      (isHostRole() && ownerClassForHand(edges[i].dst) == 0);
+        if (f.qty <= 0) { engine::finishItemTransfer(edges[i].verdictToken); continue; }
+        // Returning a cursor item to the same owner's inventory is not a transfer.
+        // There is no remote quantity change to commit or reverse.
+        if (!(f.src < f.dst) && !(f.dst < f.src)) {
+            engine::finishItemTransfer(edges[i].verdictToken); continue;
+        }
+        bool srcOwn = ownsInventoryLocalHand(edges[i].src);
+        bool dstOwn = ownsInventoryLocalHand(edges[i].dst);
         if (!srcOwn || !dstOwn) {
             // At least one end is peer-authored: the single-writer snapshots cannot
             // carry this move - author the reliable transfer intent.
@@ -1702,9 +1784,10 @@ void Replicator::detectAndPublishTransfers(GameWorld* gw, NetLink& net, u32 owne
             o.srcPeer = !srcOwn; o.dstPeer = !dstOwn; o.sentMs = now;
             std::map<Key, InvRecv>::const_iterator authority =
                 invRecv_.find(!srcOwn ? f.src : f.dst);
-            o.peerId = authority != invRecv_.end() ? authority->second.ownerId : 0;
-            o.rollbackQty = 0; o.answered = false;
+            o.peerId = authority != invRecv_.end() ? authority->second.ownerId : MAX_PLAYERS;
+            o.rollbackQty = 0; o.appliedQty = 0; o.answered = false;
             o.bagItem = engine::isContainerItemType(pkt.itemType) ? edges[i].transferredItem : 0;
+            o.verdictToken = edges[i].verdictToken;
             o.hasCanonicalBag = false;
             xferOut_[pkt.xferId] = o;
             char b[240]; _snprintf(b, sizeof(b) - 1,
@@ -1713,7 +1796,7 @@ void Replicator::detectAndPublishTransfers(GameWorld* gw, NetLink& net, u32 owne
                 f.src.t, f.src.c, f.src.cs, f.src.i, f.src.s, srcOwn ? "own" : "peer",
                 f.dst.t, f.dst.c, f.dst.cs, f.dst.i, f.dst.s, dstOwn ? "own" : "peer");
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
-        } else engine::finishTransferredBag(edges[i].transferredItem);
+        } else engine::finishItemTransfer(edges[i].verdictToken);
     }
 }
 
@@ -1728,7 +1811,7 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
         std::map<TransferId, InboundInvXferAck>::iterator done = appliedXfers_.find(id);
         if (done != appliedXfers_.end()) {
             if (done->second.pkt.ownerId == localId)
-                net.queueInvXferAck(done->second.pkt, done->second.contents);
+                queueXferVerdict(gw, net, p, done->second);
         } else {
             InboundInvXfer& pending = pendingXfers_[id];
             pending.ownerId = it->ownerId; pending.pkt = p;
@@ -1745,12 +1828,8 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
         // A hand which is still streaming is not a rejection and must not consume the id.
         if (!resolveInvWireHand(sk,sHand) || !resolveInvWireHand(dk,dHand)) { ++it; continue; }
         sk = keyForInvLocalHand(sHand); dk = keyForInvLocalHand(dHand);
-        bool srcOwn = ownedContainers_.count(sk) || ownHands_.count(sk) || censusContainers_.count(sk);
-        bool dstOwn = ownedContainers_.count(dk) || ownHands_.count(dk) || censusContainers_.count(dk);
-        if (isHostRole()) {
-            srcOwn = srcOwn || ownerClassForHand(sHand) == 0;
-            dstOwn = dstOwn || ownerClassForHand(dHand) == 0;
-        }
+        bool srcOwn = ownsInventoryLocalHand(sHand);
+        bool dstOwn = ownsInventoryLocalHand(dHand);
         // Observers consume the owners' final snapshots, not a third physical mutation.
         if (!srcOwn && !dstOwn) { pendingXfers_.erase(it++); continue; }
         std::vector<InvItemEntry> actualBag;
@@ -1785,7 +1864,7 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
         InboundInvXferAck& result = appliedXfers_[it->first];
         result.ownerId = ack.ownerId; result.pkt = ack;
         if (ack.contentsPresent) result.contents.swap(actualBag);
-        if (ack.ownerId == localId) net.queueInvXferAck(ack, result.contents);
+        if (ack.ownerId == localId) queueXferVerdict(gw, net, p, result);
         char b[240]; _snprintf(b,sizeof(b)-1,
             "[xfer] APPLY id=%u from=%u sid='%s' type=%u qty=%u moved=%d ack=%u authority=%d",
             p.xferId,p.ownerId,p.stringID,p.itemType,(unsigned)p.quantity,moved,
@@ -1795,16 +1874,26 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
     }
 }
 
-void Replicator::applyXferAcks(GameWorld* gw, Inbound& in, u32 localId) {
-    std::deque<InboundInvXferAck> got; in.drainInvXferAcks(got);
+void Replicator::applyXferAcks(GameWorld* gw, u32 localId) {
+    if (receivedXferAcks_.empty() && xferOut_.empty()) return;
+    std::deque<InboundInvXferAck> got; got.swap(receivedXferAcks_);
     for (std::deque<InboundInvXferAck>::iterator it=got.begin();it!=got.end();++it) {
         const InvXferAckPacket& a=it->pkt;
         if (a.xferOwnerId != localId) continue;
         std::map<u32,XferOut>::iterator o=xferOut_.find(a.xferId);
-        if (o==xferOut_.end() || o->second.answered || a.ownerId != o->second.peerId) continue;
+        if (o==xferOut_.end() || o->second.answered) continue;
         XferOut& x=o->second;
+        if (x.peerId == MAX_PLAYERS) {
+            // A trade can precede the peer's first periodic inventory publication.
+            // Its authority snapshot is ingested atomically with the verdict.
+            std::map<Key,InvRecv>::const_iterator authority =
+                invRecv_.find(x.srcPeer ? x.src : x.dst);
+            if (authority != invRecv_.end()) x.peerId = authority->second.ownerId;
+        }
+        if (a.ownerId != x.peerId) continue;
         x.answered=true;
-        x.rollbackQty=x.qty-(a.applied < x.qty ? a.applied : x.qty);
+        x.appliedQty = a.applied < x.qty ? a.applied : x.qty;
+        x.rollbackQty = x.qty - x.appliedQty;
         if (a.applied && a.contentsPresent && x.bagItem) {
             x.canonicalBag.swap(it->contents);
             x.hasCanonicalBag = true;
@@ -1825,7 +1914,7 @@ void Replicator::applyXferAcks(GameWorld* gw, Inbound& in, u32 localId) {
             unsigned int src[5],dst[5];
             if (!resolveInvLocalHand(x.src,src) || !resolveInvLocalHand(x.dst,dst)) { ++it; continue; }
             int undone=engine::moveItemBetweenContainers(gw,dst,src,x.key.first.c_str(),
-                                                         x.key.second,x.rollbackQty);
+                x.key.second,x.rollbackQty,true,0,0,x.bagItem,false);
             if (undone > 0) {
                 if (x.srcPeer) releaseXferLatch(x.src,x.key,+undone);
                 if (x.dstPeer) releaseXferLatch(x.dst,x.key,-undone);
@@ -1833,8 +1922,19 @@ void Replicator::applyXferAcks(GameWorld* gw, Inbound& in, u32 localId) {
             }
             if (x.rollbackQty > 0) { ++it; continue; }
         }
-        // ACCEPT is not a snapshot barrier: keep peer latches until its state catches up.
-        engine::finishTransferredBag(x.bagItem);
+        // The owner's canonical snapshot was ingested with this verdict. Release only
+        // this intent; another pending move on the same endpoint keeps its own latch.
+        if (x.srcPeer) {
+            releaseXferLatch(x.src, x.key, +x.appliedQty);
+            std::map<Key, InvRecv>::iterator r = invRecv_.find(x.src);
+            if (r != invRecv_.end()) r->second.dirty = true;
+        }
+        if (x.dstPeer) {
+            releaseXferLatch(x.dst, x.key, -x.appliedQty);
+            std::map<Key, InvRecv>::iterator r = invRecv_.find(x.dst);
+            if (r != invRecv_.end()) r->second.dirty = true;
+        }
+        engine::finishItemTransfer(x.verdictToken);
         xferOut_.erase(it++);
     }
 }

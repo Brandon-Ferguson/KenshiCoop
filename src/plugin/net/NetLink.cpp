@@ -324,18 +324,35 @@ void NetLink::setOwnedEntities(u32 ownerId, const EntityState* arr, unsigned int
 
 void NetLink::queueEvent(const EventPacket& ev) { pushLocked(outCs_, outEvents_, ev); }
 
+void NetLink::sendInvSnapshot(const OutInv& snapshot) {
+    unsigned count = (unsigned)snapshot.items.size();
+    InvSnapshotHeader header = snapshot.header;
+    if (count > INV_ITEMS_MAX) { count = INV_ITEMS_MAX; header.flags |= INV_FLAG_TRUNCATED; }
+    header.count = (u8)count;
+    unsigned bytes = sizeof(header) + count * sizeof(InvItemEntry);
+    ENetPacket* out = enet_packet_create(0, bytes, ENET_PACKET_FLAG_RELIABLE);
+    memcpy(out->data, &header, sizeof(header));
+    if (count) memcpy(out->data + sizeof(header), &snapshot.items[0], count * sizeof(InvItemEntry));
+    if (isHost_) enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+    else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED)
+        enet_peer_send(serverPeer_, CH_RELIABLE, out);
+    else enet_packet_destroy(out);
+}
+
 void NetLink::queueInvSnapshot(u32 ownerId, u8 keyKind, const u32 cKey[5],
                                const InvItemEntry* items, unsigned int count, u8 flags) {
-    OutInv oi;
-    oi.ownerId = ownerId;
-    oi.keyKind = keyKind;
-    oi.flags   = flags;
-    for (int k = 0; k < 5; ++k) oi.cKey[k] = cKey[k];
-    // Clamping here is itself a truncation: mark it so the receiver stays additive-only
-    // (the caller normally sets the flag, but never let a silent clamp delete items).
-    if (count > INV_ITEMS_MAX) { count = INV_ITEMS_MAX; oi.flags |= INV_FLAG_TRUNCATED; }
-    if (items && count > 0) oi.items.assign(items, items + count);
-    pushLocked(outCs_, outInv_, oi);
+    EnterCriticalSection(&outCs_);
+    outInv_.push_back(OutInventory());
+    outInv_.back().hasVerdict = false;
+    OutInv& oi = outInv_.back().snapshot;
+    memset(&oi.header, 0, sizeof(oi.header));
+    oi.header.type = (u8)PKT_INV_SNAPSHOT; oi.header.ownerId = ownerId;
+    oi.header.keyKind = keyKind; oi.header.flags = flags;
+    oi.header.cType = cKey[0]; oi.header.cContainer = cKey[1];
+    oi.header.cContainerSerial = cKey[2]; oi.header.cIndex = cKey[3]; oi.header.cSerial = cKey[4];
+    if (count > INV_ITEMS_MAX) { count = INV_ITEMS_MAX; oi.header.flags |= INV_FLAG_TRUNCATED; }
+    if (items && count) oi.items.assign(items, items + count);
+    LeaveCriticalSection(&outCs_);
 }
 
 void NetLink::queueWorldItems(u32 ownerId, const WorldItemEntry* items, unsigned int count) {
@@ -433,12 +450,18 @@ void NetLink::queueInvXfer(const InvXferPacket& pkt, std::vector<InvItemEntry>& 
 }
 
 void NetLink::queueInvXferAck(const InvXferAckPacket& pkt,
-                             const std::vector<InvItemEntry>& contents) {
+                             const std::vector<InvItemEntry>& contents,
+                             const InvSnapshotHeader& snapshot, const InvItemEntry* items) {
     EnterCriticalSection(&outCs_);
-    outInvXferAcks_.push_back(InboundInvXferAck());
-    InboundInvXferAck& x = outInvXferAcks_.back();
-    x.ownerId = pkt.ownerId; x.pkt = pkt; x.contents = contents;
-    x.pkt.contentsCount = (u8)x.contents.size();
+    outInv_.push_back(OutInventory());
+    OutInventory& x = outInv_.back();
+    x.hasVerdict = true;
+    x.verdict.ownerId = pkt.ownerId; x.verdict.pkt = pkt; x.verdict.contents = contents;
+    x.verdict.pkt.contentsCount = (u8)x.verdict.contents.size();
+    x.snapshot.header = snapshot;
+    unsigned int count = snapshot.count;
+    if (count > INV_ITEMS_MAX) { count = INV_ITEMS_MAX; x.snapshot.header.flags |= INV_FLAG_TRUNCATED; }
+    if (items && count) x.snapshot.items.assign(items, items + count);
     LeaveCriticalSection(&outCs_);
 }
 
@@ -1778,41 +1801,25 @@ void NetLink::threadLoop() {
             }
         }
 
-        // Drain + send any queued container-contents snapshots on CH_RELIABLE. Each
-        // is [InvSnapshotHeader][InvItemEntry*count]; only enqueued on content-change,
-        // so this channel stays quiet. Reliable so the change survives WAN loss.
-        std::vector<OutInv> invs;
+        // One FIFO keeps older snapshots before a commit and newer snapshots after it.
+        // A commit snapshot and its verdict are sent consecutively on CH_RELIABLE.
+        std::deque<OutInventory> invs;
         EnterCriticalSection(&outCs_);
         invs.swap(outInv_);
         LeaveCriticalSection(&outCs_);
         for (size_t i = 0; i < invs.size(); ++i) {
-            unsigned count = (unsigned)invs[i].items.size();
-            u8 iflags = invs[i].flags;
-            if (count > INV_ITEMS_MAX) { count = INV_ITEMS_MAX; iflags |= INV_FLAG_TRUNCATED; }
-            unsigned bytes = sizeof(InvSnapshotHeader) + count * sizeof(InvItemEntry);
-            ENetPacket* out = enet_packet_create(0, bytes, ENET_PACKET_FLAG_RELIABLE);
-            InvSnapshotHeader hdr;
-            hdr.type             = (u8)PKT_INV_SNAPSHOT;
-            hdr.ownerId          = invs[i].ownerId;
-            hdr.keyKind          = invs[i].keyKind;
-            hdr.flags            = iflags;
-            hdr.cType            = invs[i].cKey[0];
-            hdr.cContainer       = invs[i].cKey[1];
-            hdr.cContainerSerial = invs[i].cKey[2];
-            hdr.cIndex           = invs[i].cKey[3];
-            hdr.cSerial          = invs[i].cKey[4];
-            hdr.count            = (u8)count;
-            std::memcpy(out->data, &hdr, sizeof(hdr));
-            if (count > 0)
-                std::memcpy(out->data + sizeof(hdr), &invs[i].items[0],
-                            count * sizeof(InvItemEntry));
-            if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
-            } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+            sendInvSnapshot(invs[i].snapshot);
+            if (!invs[i].hasVerdict) continue;
+            const InboundInvXferAck& verdict = invs[i].verdict;
+            size_t bytes = verdict.contents.size() * sizeof(InvItemEntry);
+            ENetPacket* out = enet_packet_create(0, sizeof(InvXferAckPacket) + bytes,
+                                                 ENET_PACKET_FLAG_RELIABLE);
+            memcpy(out->data, &verdict.pkt, sizeof(InvXferAckPacket));
+            if (bytes) memcpy(out->data + sizeof(InvXferAckPacket), &verdict.contents[0], bytes);
+            if (isHost_) enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+            else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED)
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
-            } else {
-                enet_packet_destroy(out);
-            }
+            else enet_packet_destroy(out);
         }
 
         // Drain + send any queued world-item snapshots on CH_RELIABLE (Phase W1). Each
@@ -1950,25 +1957,6 @@ void NetLink::threadLoop() {
             }
         }
 
-        // Transfer VERDICTS (protocol 50), same channel as the intents.
-        std::deque<InboundInvXferAck> xferAcks;
-        EnterCriticalSection(&outCs_);
-        xferAcks.swap(outInvXferAcks_);
-        LeaveCriticalSection(&outCs_);
-        for (size_t i = 0; i < xferAcks.size(); ++i) {
-            size_t bytes = xferAcks[i].contents.size() * sizeof(InvItemEntry);
-            ENetPacket* out = enet_packet_create(0, sizeof(InvXferAckPacket) + bytes,
-                                                 ENET_PACKET_FLAG_RELIABLE);
-            memcpy(out->data, &xferAcks[i].pkt, sizeof(InvXferAckPacket));
-            if (bytes) memcpy(out->data + sizeof(InvXferAckPacket), &xferAcks[i].contents[0], bytes);
-            if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
-            } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
-                enet_peer_send(serverPeer_, CH_RELIABLE, out);
-            } else {
-                enet_packet_destroy(out);
-            }
-        }
 
         // Drain + send any queued medical snapshots + treatment deltas on
         // CH_RELIABLE (phase 2). Fixed-size PODs like events; change-gated by the
@@ -2132,10 +2120,8 @@ void NetLink::threadLoop() {
             }
         }
 
-        // Drain + send any queued baked-door state rows on CH_RELIABLE
-        // (protocol 26). Change-gated by the Replicator; a settled town is
-        // silent. A lost row would leave a door diverged until the safety
-        // resend, so reliable is the right channel.
+        // Drain reliable door/container-lock changes. ENet handles delivery;
+        // the Replicator replays current host state when a peer connects.
         std::vector<DoorPacket> doorPkts;
         EnterCriticalSection(&outCs_);
         doorPkts.swap(outDoor_);

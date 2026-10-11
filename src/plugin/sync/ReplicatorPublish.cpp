@@ -15,9 +15,7 @@ namespace coop {
 
 // v57: stamp the carried body's world pose onto EVT_DROP_BODY so the peer
 // parks nametag+mesh immediately instead of waiting for the next entity tick.
-static bool fillDropPose(EventPacket& ev) {
-    Character* who = engine::resolveCharByHand(
-        ev.sIndex, ev.sSerial, ev.sType, ev.sContainer, ev.sContainerSerial);
+static bool fillDropPose(EventPacket& ev, Character* who) {
     float x = 0.0f, y = 0.0f, z = 0.0f, h = 0.0f;
     if (who && engine::readPose(who, &x, &y, &z, &h)) {
         ev.x = x; ev.y = y; ev.z = z; ev.heading = h; ev.poseValid = 1;
@@ -158,7 +156,7 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
         ownHands_.insert(hk);
         // Join-owned body in flight: host streams the pose; skip our ragdoll
         // snapshot so the two sims cannot fight.
-        if (thrown_.find(hk) != thrown_.end()) continue;
+        if (thrown_.find(ownedWireKey(hk)) != thrown_.end()) continue;
         buf[n++] = raw[i];
         {
             std::map<Key, Key>::const_iterator wt = publishAsWire_.find(hk);
@@ -171,6 +169,7 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
             }
         }
     }
+    const unsigned int ownedPublished = n;
     // Jail put-to-work desync spike (KENSHICOOP_JAIL_PROBE, read-only): the
     // OWNED view of any captive body (the join's real, authoritative PC while it
     // is jailed). Correlate side=own here against side=drv from the host's
@@ -206,45 +205,8 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
             coop::logLine(b);
         }
     }
-    // Combat-subject CANONICAL translation (join-initiated town combat, run
-    // 20260712_180913): the capture reads the target's LOCAL hand, but a body
-    // this client is DRIVING can live in a local runtime container that the
-    // peer has never heard of (the engine separateIntoMyOwnSquad's a town NPC
-    // when a fight starts; a minted proxy never had the peer's hand at all).
-    // Publish the SUBJECT under the key the peer streams it by (canonicalOf_,
-    // stamped every drive tick) or the peer's applyCombat resolves nothing
-    // (r=1 forever) and the fight renders on one client only.
-    for (unsigned int i = 0; i < n; ++i) {
-        EntityState& e = buf[i];
-        if (!coop::taskIsCombat(e.task)) continue;
-        Character* tc = engine::resolveCharByHand(e.sIndex, e.sSerial, e.sType,
-                                                  e.sContainer, e.sContainerSerial);
-        if (!tc) continue;
-        std::map<Character*, Key>::const_iterator cit = canonicalOf_.find(tc);
-        if (cit == canonicalOf_.end()) continue;
-        const Key& ck = cit->second;
-        if (ck.i == e.sIndex && ck.s == e.sSerial && ck.t == e.sType &&
-            ck.c == e.sContainer && ck.cs == e.sContainerSerial)
-            continue;
-        char b[176]; _snprintf(b, sizeof(b) - 1,
-            "[combat] CAP xlate hand=%u,%u tgt local=%u,%u,%u,%u,%u -> wire=%u,%u,%u,%u,%u",
-            e.hIndex, e.hSerial,
-            e.sType, e.sContainer, e.sContainerSerial, e.sIndex, e.sSerial,
-            ck.t, ck.c, ck.cs, ck.i, ck.s);
-        b[sizeof(b) - 1] = '\0';
-        e.sType = ck.t; e.sContainer = ck.c; e.sContainerSerial = ck.cs;
-        e.sIndex = ck.i; e.sSerial = ck.s;
-        // Throttle the log per canonical victim (the rewrite itself runs every
-        // publish frame).
-        unsigned long xNow = nowMs();
-        std::map<Key, unsigned long>::iterator xt = combatCapMs_.find(ck);
-        if (xt == combatCapMs_.end() || (xNow - xt->second) >= 2000) {
-            combatCapMs_[ck] = xNow;
-            coop::logLine(b);
-        }
-    }
     // Build-site subject translation (2026-08-01 construction animation). Same
-    // shape as the combat rewrite above and for the same underlying reason: the
+    // shape as the combat rewrite and for the same underlying reason: the
     // capture reads the site's LOCAL hand, but a construction site is created at
     // RUNTIME so that hand means nothing on the peer. Publish it in the PLACER's
     // key space (our own hand if we placed it, the placer's key if we minted it)
@@ -537,20 +499,75 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
             bool have = false;
             for (unsigned int bi = 0; bi < n && !have; ++bi)
                 have = (buf[bi].hIndex == tk.i && buf[bi].hSerial == tk.s &&
-                        buf[bi].hType == tk.t && buf[bi].hContainer == tk.c);
+                        buf[bi].hType == tk.t && buf[bi].hContainer == tk.c &&
+                        buf[bi].hContainerSerial == tk.cs);
             if (have) continue;
+            unsigned int native[5] = { tk.t, tk.c, tk.cs, tk.i, tk.s };
+            Character* passenger = resolveEventChar(tk);
+            if (passenger && !engine::readObjectHand(
+                    reinterpret_cast<RootObject*>(passenger), native)) continue;
             bool got = false;
             for (unsigned int si = 0; si < nSquad && !got; ++si) {
-                if (raw[si].hIndex == tk.i && raw[si].hSerial == tk.s &&
-                    raw[si].hType == tk.t && raw[si].hContainer == tk.c) {
+                if (raw[si].hIndex == native[3] && raw[si].hSerial == native[4] &&
+                    raw[si].hType == native[0] && raw[si].hContainer == native[1] &&
+                    raw[si].hContainerSerial == native[2]) {
                     buf[n] = raw[si];
                     got = true;
                 }
             }
             if (!got &&
-                engine::captureNpcByHand(gw, tk.i, tk.s, tk.t, tk.c, tk.cs, &buf[n]))
+                engine::captureNpcByHand(gw, native[3], native[4],
+                    native[0], native[1], native[2], &buf[n]))
                 got = true;
-            if (got) ++n;
+            if (got) {
+                buf[n].hType = tk.t; buf[n].hContainer = tk.c;
+                buf[n].hContainerSerial = tk.cs;
+                buf[n].hIndex = tk.i; buf[n].hSerial = tk.s;
+                ++n;
+            }
+        }
+    }
+    // Combat-subject CANONICAL translation (join-initiated town combat, run
+    // 20260712_180913): the capture reads the target's LOCAL hand, but a body
+    // this client is DRIVING can live in a local runtime container that the
+    // peer has never heard of (the engine separateIntoMyOwnSquad's a town NPC
+    // when a fight starts; a minted proxy never had the peer's hand at all).
+    // Publish the SUBJECT under the key the peer streams it by (canonicalOf_,
+    // stamped every drive tick) or the peer's applyCombat resolves nothing
+    // (r=1 forever) and the fight renders on one client only.
+    for (unsigned int i = 0; i < n; ++i) {
+        EntityState& e = buf[i];
+        if (!coop::taskIsCombat(e.task) && !coop::taskIsCarry(e.task)) continue;
+        Key subject; subject.t = e.sType; subject.c = e.sContainer;
+        subject.cs = e.sContainerSerial; subject.i = e.sIndex; subject.s = e.sSerial;
+        const Key* canonical = &ownedWireKey(subject);
+        if (canonical == &subject) {
+            Character* tc = engine::resolveCharByHand(e.sIndex, e.sSerial, e.sType,
+                e.sContainer, e.sContainerSerial);
+            if (!tc) continue;
+            std::map<Character*, Key>::const_iterator cit = canonicalOf_.find(tc);
+            if (cit == canonicalOf_.end()) continue;
+            canonical = &cit->second;
+        }
+        const Key& ck = *canonical;
+        if (ck.i == e.sIndex && ck.s == e.sSerial && ck.t == e.sType &&
+            ck.c == e.sContainer && ck.cs == e.sContainerSerial)
+            continue;
+        char b[176]; _snprintf(b, sizeof(b) - 1,
+            "[combat] CAP xlate hand=%u,%u tgt local=%u,%u,%u,%u,%u -> wire=%u,%u,%u,%u,%u",
+            e.hIndex, e.hSerial,
+            e.sType, e.sContainer, e.sContainerSerial, e.sIndex, e.sSerial,
+            ck.t, ck.c, ck.cs, ck.i, ck.s);
+        b[sizeof(b) - 1] = '\0';
+        e.sType = ck.t; e.sContainer = ck.c; e.sContainerSerial = ck.cs;
+        e.sIndex = ck.i; e.sSerial = ck.s;
+        // Throttle the log per canonical victim (the rewrite itself runs every
+        // publish frame).
+        unsigned long xNow = nowMs();
+        std::map<Key, unsigned long>::iterator xt = combatCapMs_.find(ck);
+        if (xt == combatCapMs_.end() || (xNow - xt->second) >= 2000) {
+            combatCapMs_[ck] = xNow;
+            coop::logLine(b);
         }
     }
     net.setOwnedEntities(ownerId, buf, n);
@@ -595,7 +612,7 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
     // DEAD in interest. A stale grace window keeps vitals flowing over a brief
     // stance flicker, then the NPC drops back to the events-only model.
     if (streamNpcs_) {
-        unsigned int nOwned = (unsigned int)ownHands_.size();
+        unsigned int nOwned = ownedPublished;
         std::set<Key> npcKeys;
         for (unsigned int i = nOwned; i < n; ++i) npcKeys.insert(keyOf(buf[i]));
         for (unsigned int i = nOwned; i < n; ++i) {
@@ -645,7 +662,7 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
         // the 2026-07-07 session gap: a host-side NPC hauling a downed PC never
         // reached the join. Join NPCs never take this branch (streamNpcs_ is
         // host-only), so NPC carry authorship stays one-directional by design.
-        bool carryAuthor = ownHands_.find(k) != ownHands_.end() || streamNpcs_;
+        bool carryAuthor = ownHands_.count(k) || pinOwned_.count(k) || streamNpcs_;
         if (carrySync_ && carryAuthor) {
             bool carryNow = coop::taskIsCarry(e.task);
             bool sameBody = hb.carrying && carryNow &&
@@ -663,20 +680,14 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
                 ev.aContainerSerial = e.hContainerSerial;
                 ev.aIndex = e.hIndex; ev.aSerial = e.hSerial;
                 ev.arg = DROP_ARG_RAGDOLL; // ragdoll release (start thrown/flight)
-                if (!fillDropPose(ev)) {
-                    Key fk; fk.t = ev.sType; fk.c = ev.sContainer; fk.cs = ev.sContainerSerial;
-                    fk.i = ev.sIndex; fk.s = ev.sSerial;
-                    dropFallback.push_back(fk);
-                }
-                {
-                    Key pk; pk.t = ev.sType; pk.c = ev.sContainer; pk.cs = ev.sContainerSerial;
-                    pk.i = ev.sIndex; pk.s = ev.sSerial;
-                    beginThrown(pk);
-                }
+                Key pk; pk.t = ev.sType; pk.c = ev.sContainer; pk.cs = ev.sContainerSerial;
+                pk.i = ev.sIndex; pk.s = ev.sSerial;
+                Character* dropBody = resolveEventChar(pk);
+                if (!fillDropPose(ev, dropBody)) dropFallback.push_back(pk);
+                beginThrown(pk);
                 net.queueEvent(ev);
                 {
-                    Character* who = engine::resolveCharByHand(
-                        ev.sIndex, ev.sSerial, ev.sType, ev.sContainer, ev.sContainerSerial);
+                    Character* who = dropBody;
                     engine::DriveProbe pr; memset(&pr, 0, sizeof(pr));
                     if (who) engine::readDriveProbe(who, &pr);
                     unsigned short bs = who ? engine::readBodyState(who) : 0;
@@ -767,7 +778,7 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
                     // An unreadable hand this frame leaves furnKind 0 so the edge
                     // re-attempts next publish (the bit is still streaming).
                     engine::FurnitureRead fr;
-                    Character* oc = engine::resolve(e);
+                    Character* oc = resolveEventChar(k);
                     if (oc && engine::readFurniture(oc, &fr) && fr.valid &&
                         fr.kind == curKind) {
                         EventPacket ev; memset(&ev, 0, sizeof(ev));
@@ -820,16 +831,10 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
             ev.aType = ck.t; ev.aContainer = ck.c; ev.aContainerSerial = ck.cs;
             ev.aIndex = ck.i; ev.aSerial = ck.s;
             ev.arg = DROP_ARG_RAGDOLL;
-            if (!fillDropPose(ev)) {
-                Key fk; fk.t = ev.sType; fk.c = ev.sContainer; fk.cs = ev.sContainerSerial;
-                fk.i = ev.sIndex; fk.s = ev.sSerial;
-                dropFallback.push_back(fk);
-            }
-            {
-                Key pk; pk.t = ev.sType; pk.c = ev.sContainer; pk.cs = ev.sContainerSerial;
-                pk.i = ev.sIndex; pk.s = ev.sSerial;
-                beginThrown(pk);
-            }
+            Key pk; pk.t = ev.sType; pk.c = ev.sContainer; pk.cs = ev.sContainerSerial;
+            pk.i = ev.sIndex; pk.s = ev.sSerial;
+            if (!fillDropPose(ev, resolveEventChar(pk))) dropFallback.push_back(pk);
+            beginThrown(pk);
             net.queueEvent(ev);
             hb.carrying = false;
             char b[240]; _snprintf(b, sizeof(b) - 1,

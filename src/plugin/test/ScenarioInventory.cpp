@@ -2538,11 +2538,12 @@ public:
     CriticalStockScenario(const char* scenario = "critical_stock", int kind = 0) :
         passed_(false), have_(false), step_(0), lastLog_(0), raceOk_(false),
         depositOk_(false), restockOk_(false), type_(0), base_(0), scenario_(scenario), kind_(kind),
-        seedCount_(kind == 5 ? 2 : 1) {
+        seedCount_(kind == 5 ? 2 : 1), pendingUseBlocked_(kind != 6) {
         memset(r_, 0, sizeof(r_)); memset(chest_, 0, sizeof(chest_)); sid_[0] = 0;
     }
     virtual const char* name() const { return scenario_; }
     virtual void onStart(const ScenarioContext& ctx) {
+        if (ctx.isHost) pendingUseBlocked_ = true;
         EntityState squad[32];
         unsigned int ns = engine::captureSquad(ctx.gw, false, squad, 32);
         bool found[2] = { false, false };
@@ -2707,6 +2708,16 @@ public:
                                                   sid_, type_, 1, false);
             char b[128]; _snprintf(b, sizeof(b)-1, "CRIT TAKE host=%d moved=%d", ctx.isHost, moved);
             b[sizeof(b)-1] = 0; coop::logLine(b); step_ = 2;
+            if (kind_ == 6 && !ctx.isHost) {
+                // A real user can immediately drop a speculative pickup before
+                // its authority verdict arrives. It must remain unusable until ACK.
+                if (moved == 1) engine::dropItemFromInventory(ctx.gw, r_[1], sid_, type_, 1);
+                pendingUseBlocked_ = moved == 0 || count(ctx.gw, r_[1]) == baseOf_[1] + 1;
+                char p[128]; _snprintf(p, sizeof(p)-1,
+                    "CRIT PENDING host=0 blocked=%d remaining=%d",
+                    pendingUseBlocked_, count(ctx.gw, r_[1]));
+                p[sizeof(p)-1] = 0; coop::logLine(p);
+            }
         }
         if (step_ == 2 && ctx.elapsedMs >= 20000) {
             raceOk_ = total(ctx.gw) == base_ + seedCount_ &&
@@ -2736,7 +2747,7 @@ public:
             b[sizeof(b)-1] = 0; coop::logLine(b);
         }
         if (ctx.elapsedMs >= (ctx.isHost ? 48000UL : 44000UL)) {
-            passed_ = step_ == 5 && raceOk_ && depositOk_ && restockOk_;
+            passed_ = step_ == 5 && raceOk_ && depositOk_ && restockOk_ && pendingUseBlocked_;
             return true;
         }
         return false;
@@ -2756,6 +2767,7 @@ private:
     bool passed_, have_; int step_; unsigned long lastLog_;
     bool raceOk_, depositOk_, restockOk_; unsigned int type_, r_[2][5], chest_[5]; int base_, baseOf_[2]; char sid_[48];
     const char* scenario_; int kind_, seedCount_;
+    bool pendingUseBlocked_;
 };
 
 // Materialize a shared save-native item after the initial spatial baseline,
@@ -2800,11 +2812,15 @@ private:
 
 class CriticalBagScenario : public Scenario {
 public:
-    CriticalBagScenario(bool take = false) : have_(false), passed_(false), take_(take),
-        step_(0), type_(0), base_(0), moved_(0), last_(0) {
+    CriticalBagScenario(bool take = false, bool hold = false) :
+        have_(false), passed_(false), take_(take), hold_(hold), held_(0),
+        step_(0), auxStep_(0), verdictReleased_(false), auxDropped_(false),
+        type_(0), base_(0), auxBase_(0), moved_(0), last_(0) {
         memset(r_,0,sizeof(r_)); sid_[0]=bag_[0]=0;
     }
-    virtual const char* name() const { return take_ ? "critical_bag_take" : "critical_bag"; }
+    virtual const char* name() const {
+        return hold_ ? "critical_bag_hold" : take_ ? "critical_bag_take" : "critical_bag";
+    }
     virtual void onStart(const ScenarioContext& ctx) {
         engine::commonTestItemSid(ctx.gw,sid_,sizeof(sid_),&type_);
         EntityState squad[32];
@@ -2846,36 +2862,169 @@ public:
             engine::applyContainerContents(ctx.gw,r_[0],parents,n,false);
         }
         base_=0;
+        auxBase_ = have_ ? sourceFood(ctx.gw) : 0;
         char b[128];_snprintf(b,sizeof(b)-1,"CRIT BAG anchor host=%d have=%d bag='%s' base=%d",
             ctx.isHost,have_,bag_,base_);b[sizeof(b)-1]=0;coop::logLine(b);
     }
     virtual bool onTick(const ScenarioContext& ctx) {
         if(!have_) return ctx.elapsedMs>=5000;
-        if(ctx.isHost && step_==0 && ctx.elapsedMs>=10000) {
+        if(ctx.isHost && step_==0 && ctx.elapsedMs >= (hold_ ? 8000UL : 10000UL)) {
             int added=engine::addItemToNestedContainer(ctx.gw,r_[0],sid_,type_,2);
             step_=added==2?1:-1;
         }
-        if((ctx.isHost != take_) && step_!=2 && ctx.elapsedMs>=10000) {
-            moved_=engine::moveItemBetweenContainers(ctx.gw,r_[0],r_[1],bag_,46,1,false);
-            step_=2;
+        // A second transfer must not publish the other player's cursor-held omission.
+        if (hold_ && !ctx.isHost && auxStep_ == 0 && ctx.elapsedMs >= 8000) {
+            int added = engine::addItemsToContainerBySid(ctx.gw, r_[1],
+                "209-gamedata.base", 4, 1, 10000, "", "");
+            auxStep_ = added == 1 ? 1 : -1;
+        }
+        if (hold_ && !ctx.isHost && auxStep_ == 1 && ctx.elapsedMs >= 16000) {
+            int offered = engine::moveItemBetweenContainers(ctx.gw, r_[1], r_[0],
+                "209-gamedata.base", 4, 1, false);
+            auxStep_ = offered == 1 ? 2 : -1;
+            coop::logLine(offered == 1 ? "CRIT BAG concurrent-offer=1" :
+                                         "CRIT BAG concurrent-offer FAILED");
+        }
+        if (hold_ && ctx.isHost && step_ == 1 && ctx.elapsedMs >= 12000) {
+            held_ = engine::holdInventoryBag(ctx.gw, r_[0], bag_);
+            step_ = held_ ? 3 : -1;
+            coop::logLine(held_ ? "CRIT BAG cursor-held" : "CRIT BAG cursor-remove FAILED");
+        } else if (hold_ && ctx.isHost && step_ == 3 && ctx.elapsedMs >= 20000) {
+            moved_ = engine::putHeldInventoryBag(ctx.gw, r_[1], held_) ? 1 : 0;
+            if (moved_ || engine::putHeldInventoryBag(ctx.gw, r_[0], held_)) held_ = 0;
+            step_ = 2;
+        } else if (!hold_ && (ctx.isHost != take_) && step_ != 2 && ctx.elapsedMs >= 10000) {
+            moved_ = engine::moveItemBetweenContainers(ctx.gw, r_[0], r_[1], bag_, 46, 1, false);
+            step_ = 2;
+        }
+        if (hold_ && ctx.isHost && step_ == 3 && auxStep_ == 0 && ctx.elapsedMs >= 18000) {
+            auxStep_ = 1;
+            // The later full commit must describe native changes made during the hold,
+            // even when periodic inventory streaming is disabled on both players.
+            engine::dropItemFromInventory(ctx.gw, r_[0], "209-gamedata.base", 4, 1);
+            auxDropped_ = sourceFood(ctx.gw) == auxBase_;
+            coop::logLine(auxDropped_ ? "CRIT BAG confirmed-food-drop=1" :
+                                       "CRIT BAG confirmed-food-drop FAILED");
+        }
+        if (hold_ && ctx.isHost && step_ == 2 && ctx.elapsedMs >= 22000) {
+            // Exercise native use, not merely the visible count: an ignored verdict
+            // leaves this confirmed bag permanently reserved on the sending peer.
+            Item* confirmed = engine::holdInventoryBag(ctx.gw, r_[1], bag_);
+            verdictReleased_ = confirmed &&
+                engine::putHeldInventoryBag(ctx.gw, r_[1], confirmed);
+            step_ = 4;
+            coop::logLine(verdictReleased_ ? "CRIT BAG verdict-released=1" :
+                                            "CRIT BAG verdict-released=0");
         }
         if(ctx.elapsedMs-last_>=500) {
             last_=ctx.elapsedMs;
             int src=engine::nestedContainerCount(ctx.gw,r_[0]);
             int dst=engine::nestedContainerCount(ctx.gw,r_[1]);
             int inside=engine::countInNestedContainer(ctx.gw,r_[1],sid_,type_);
-            passed_=src==0 && dst==1 && inside==base_+2 && ((ctx.isHost == take_) || moved_==1);
+            passed_=src==0 && dst==1 && inside==base_+2 && ((ctx.isHost == take_) || moved_==1) &&
+                    (!hold_ || (sourceFood(ctx.gw) == auxBase_ &&
+                        (ctx.isHost ? verdictReleased_ && auxDropped_ : auxStep_ == 2)));
             char b[160];_snprintf(b,sizeof(b)-1,
                 "CRIT BAG host=%d t=%lu src=%d dst=%d inside=%d expected=%d moved=%d pass=%d",
                 ctx.isHost,ctx.elapsedMs,src,dst,inside,base_+2,moved_,passed_);
             b[sizeof(b)-1]=0;coop::logLine(b);
+            if (hold_) {
+                char food[112]; _snprintf(food,sizeof(food)-1,
+                    "CRIT BAG food host=%d actual=%d expected=%d",
+                    ctx.isHost,sourceFood(ctx.gw),auxBase_);
+                food[sizeof(food)-1]=0;coop::logLine(food);
+            }
         }
         return ctx.elapsedMs>=(ctx.isHost?30000UL:26000UL);
     }
     virtual bool passed() const { return have_ && passed_; }
 private:
-    bool have_,passed_,take_;int step_;unsigned int type_,r_[2][5];char sid_[48],bag_[48];
-    int base_,moved_;unsigned long last_;
+    int sourceFood(GameWorld* gw) const {
+        InvItemEntry rows[INV_ITEMS_MAX];
+        unsigned int n=engine::captureContainerContents(gw,r_[0],rows,INV_ITEMS_MAX,0);
+        int count=0;
+        for (unsigned int i=0;i<n;++i)
+            if (rows[i].itemType==4 && strcmp(rows[i].stringID,"209-gamedata.base")==0)
+                count+=rows[i].quantity;
+        return count;
+    }
+    bool have_,passed_,take_,hold_; Item* held_;
+    int step_,auxStep_;bool verdictReleased_,auxDropped_;
+    unsigned int type_,r_[2][5];char sid_[48],bag_[48];
+    int base_,auxBase_,moved_;unsigned long last_;
+};
+
+// A bag containing a provisional loose-item transfer cannot itself escape
+// before the authority verdict. This uses the real nested inventory's hand.
+class CriticalBagReservationScenario : public Scenario {
+public:
+    CriticalBagReservationScenario() : have_(false), seeded_(false),
+        done_(false), passed_(false), type_(0) {
+        memset(r_,0,sizeof(r_));sid_[0]=bag_[0]=0;
+    }
+    virtual const char* name() const { return "critical_bag_nested_reserved"; }
+    virtual void onStart(const ScenarioContext& ctx) {
+        engine::commonTestItemSid(ctx.gw,sid_,sizeof(sid_),&type_);
+        EntityState squad[32]; bool found[2]={false,false};
+        unsigned int ns=engine::captureSquad(ctx.gw,false,squad,32);
+        for (unsigned int c=0;c<ns;++c) {
+            unsigned int h[5]={squad[c].hType,squad[c].hContainer,
+                squad[c].hContainerSerial,squad[c].hIndex,squad[c].hSerial};
+            int owner=engine::inventoryOwnerClass(h);
+            if (owner!=1 && owner!=2) continue;
+            unsigned int slot=owner==(ctx.isHost?1:2)?0:1;
+            if (found[slot] || engine::nestedContainerCount(ctx.gw,h)!=1) continue;
+            InvItemEntry rows[INV_ITEMS_MAX];
+            unsigned int n=engine::captureContainerContents(ctx.gw,h,rows,INV_ITEMS_MAX,0);
+            for (unsigned int i=0;i<n;++i)
+                if (engine::isContainerItemType(rows[i].itemType) &&
+                    (!bag_[0] || strcmp(bag_,rows[i].stringID)==0)) {
+                    strcpy(bag_,rows[i].stringID);memcpy(r_[slot],h,sizeof(h));
+                    found[slot]=true;break;
+                }
+        }
+        have_=found[0] && found[1] && sid_[0];
+        if (have_) {
+            unsigned int own=ctx.isHost?0:1;
+            InvItemEntry parents[INV_ITEMS_MAX];
+            unsigned int n=engine::captureContainerContents(ctx.gw,r_[own],parents,INV_ITEMS_MAX,0);
+            engine::applyContainerContents(ctx.gw,r_[own],parents,n,false);
+        }
+    }
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!have_) return ctx.elapsedMs>=5000;
+        if (!seeded_ && ctx.elapsedMs>=8000) {
+            unsigned int own=ctx.isHost?0:1;
+            int expected=ctx.isHost?2:3;
+            seeded_=engine::addItemToNestedContainer(ctx.gw,r_[own],sid_,type_,expected)==expected;
+            if (!seeded_) { have_=false;return true; }
+        }
+        if (!ctx.isHost && !done_ && ctx.elapsedMs>=12000) {
+            done_=true;
+            bool fixture=engine::countInNestedContainer(ctx.gw,r_[0],sid_,type_)==2 &&
+                         engine::countInNestedContainer(ctx.gw,r_[1],sid_,type_)==3;
+            unsigned int bagHand[5];
+            int took=fixture && engine::inventoryBagHand(ctx.gw,r_[1],bagHand) ?
+                engine::moveItemBetweenContainers(ctx.gw,r_[0],bagHand,sid_,type_,1,false):0;
+            Item* escaped=took==1?engine::holdInventoryBag(ctx.gw,r_[1],bag_):0;
+            bool blocked=took==1 && !escaped;
+            if (escaped) engine::putHeldInventoryBag(ctx.gw,r_[1],escaped);
+            passed_=blocked && engine::nestedContainerCount(ctx.gw,r_[1])==1 &&
+                engine::countInNestedContainer(ctx.gw,r_[1],sid_,type_)==4;
+            char b[128];_snprintf(b,sizeof(b)-1,
+                "CRIT BAG NESTED took=%d bag-remove-blocked=%d contents=%d",
+                took,blocked,engine::countInNestedContainer(ctx.gw,r_[1],sid_,type_));
+            b[sizeof(b)-1]=0;coop::logLine(b);
+        }
+        if (ctx.isHost && ctx.elapsedMs>=18000)
+            passed_=engine::nestedContainerCount(ctx.gw,r_[0])==1 &&
+                    engine::nestedContainerCount(ctx.gw,r_[1])==1 &&
+                    engine::countInNestedContainer(ctx.gw,r_[0],sid_,type_)==1;
+        return ctx.elapsedMs>=20000;
+    }
+    virtual bool passed() const { return have_ && seeded_ && passed_; }
+private:
+    bool have_,seeded_,done_,passed_;unsigned int type_,r_[2][5];char sid_[48],bag_[48];
 };
 
 class CriticalShopsScenario : public Scenario {
@@ -2960,11 +3109,14 @@ Scenario* makeInventoryScenario(const std::string& name) {
     if (name == "critical_ground") return new CriticalGroundScenario();
     if (name == "critical_bag") return new CriticalBagScenario();
     if (name == "critical_bag_take") return new CriticalBagScenario(true);
+    if (name == "critical_bag_hold") return new CriticalBagScenario(false, true);
+    if (name == "critical_bag_nested_reserved") return new CriticalBagReservationScenario();
     if (name == "critical_npc") return new CriticalStockScenario("critical_npc", 1);
     if (name == "critical_vendor") return new CriticalStockScenario("critical_vendor", 2);
     if (name == "critical_workstation") return new CriticalStockScenario("critical_workstation", 3);
     if (name == "critical_ore") return new CriticalStockScenario("critical_ore", 4);
     if (name == "critical_ore_split") return new CriticalStockScenario("critical_ore_split", 5);
+    if (name == "critical_ore_pending") return new CriticalStockScenario("critical_ore_pending", 6);
     if (name == "critical_shops_squin") return new CriticalShopsScenario(false);
     if (name == "critical_shops_waystation") return new CriticalShopsScenario(true);
     // Same scenario twice: the plain run proves the round trip converges, and the

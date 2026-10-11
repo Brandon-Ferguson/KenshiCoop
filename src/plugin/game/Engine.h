@@ -750,16 +750,22 @@ int addItemsToContainerBySid(GameWorld* gw, const unsigned int cHand[5],
 // the factory cannot rebuild (weapons). Loose stacks move first, then worn copies (the
 // "drag out of an equip slot" case). If the destination refuses the item it is put BACK
 // into src (never leaked). Returns the number moved.
-// suspendVeto (default true): sanctioned sync relocations keep the trade veto
-// suspended so it never refuses them. The xfer_block test passes false to drive
-// the engine primitives EXACTLY like a UI drag (subject to the veto), so it can
-// assert a cross-owner move is refused (returns 0, item conserved in src).
+// suspendVeto (default true): sanctioned sync relocations suspend veto/capture.
+// Passing false drives the native primitives like a UI drag, protected by hooks.
+// respectReservations (default true) is independent of that suspension: sanctioned
+// moves skip items awaiting a transfer verdict, bags holding matching pending loose
+// items, and contents of reserved whole bags.
+// Rollback alone passes respectReservations=false to return its reserved item.
+// A nonnull exactSourceItem restricts the move to that object, returning the actual
+// bag rather than an old same-SID bag.
 int moveItemBetweenContainers(GameWorld* gw, const unsigned int srcHand[5],
                               const unsigned int dstHand[5],
                               const char* sid, unsigned int typeCat, int qty,
                               bool suspendVeto = true,
                               const std::vector<InvItemEntry>* suppliedBag = 0,
-                              std::vector<InvItemEntry>* actualBag = 0);
+                              std::vector<InvItemEntry>* actualBag = 0,
+                              void* exactSourceItem = 0,
+                              bool respectReservations = true);
 
 // ---- Cross-owner trade veto (block direct squad-to-squad transfers) --------
 // The engine has no single "drag" entry point (the squad-move problem), so a
@@ -777,7 +783,8 @@ int moveItemBetweenContainers(GameWorld* gw, const unsigned int srcHand[5],
 //   2 = a squad member owned by the PEER
 // A move is cross-owner iff one end is 1 and the other is 2.
 typedef int (*InvOwnerClassFn)(const unsigned int ownerHand[5]);
-void setInvOwnerClassifier(InvOwnerClassFn fn);
+typedef bool (*InvAuthorityFn)(const unsigned int ownerHand[5]);
+void setInvOwnerClassifier(InvOwnerClassFn fn, InvAuthorityFn authority);
 int inventoryOwnerClass(const unsigned int ownerHand[5]);
 
 // Enable/disable the cross-owner drag veto (KENSHICOOP_BLOCK_XFER). Off by
@@ -795,16 +802,19 @@ struct ItemTransferEdge {
     unsigned int src[5], dst[5];
     InvItemEntry item;
     Item* transferredItem;       // local only; bags never merge during native add
+    unsigned __int64 verdictToken; // local reservation; loose stacks may merge on add
     unsigned int contentsSlot;   // native queue's separately owned variable payload
 };
 unsigned int drainItemTransfers(ItemTransferEdge* out, unsigned int maxOut);
 void clearItemTransfers();
+// Inventory guard: full five-word owner identity matches a pending cursor removal,
+// either end of a queued transfer, or a destination awaiting its transfer verdict.
 bool itemTransferPending(const unsigned int ownerHand[5]);
 bool captureBagContents(Item* bag, std::vector<InvItemEntry>& contents);
 void takeItemTransferContents(unsigned int slot, std::vector<InvItemEntry>& contents);
 bool applyTransferredBagContents(GameWorld* gw, Item* bag,
                                   const std::vector<InvItemEntry>& contents);
-void finishTransferredBag(Item* bag);
+void finishItemTransfer(unsigned __int64 verdictToken);
 
 // SEH-guarded (store_probe): like addTestItemsToContainer, but walks the common
 // stackable templates until the container ACCEPTS one - storage buildings are
@@ -1790,18 +1800,16 @@ bool installFactionHooks();
 unsigned int drainFactionDeltas(FactionDelta* out, unsigned int maxOut);
 
 // ---- Protocol 26: door/gate state sync ---------------------------------------
-// One row per BAKED door/gate near the interest centers. The wire identity is
-// the door Building's save-stable hand - the exact key the furniture/bed sync
-// already round-trips cross-client. `open` collapses the animated DoorState
-// (OPEN/OPENING = 1, CLOSED/CLOSING = 0) so a door in motion publishes its
-// DESTINATION, not the transient.
+// One row per door/gate or lockable container near the interest centers.
+// Real doors collapse OPEN/OPENING to 1 and CLOSED/CLOSING to 0; containers
+// have state=-1 and open=0 and carry only their native lock state.
 struct DoorRead {
     unsigned int hand[5]; // [type, container, containerSerial, index, serial]
     float x, y, z;        // world position (census diagnostics only)
     int   open;           // 1 = open/opening
     int   locked;         // DoorLock engaged (0 when no lock)
-    int   hasLock;        // door carries a DoorLock at all
-    int   state;          // raw DoorState (probe diagnostics)
+    int   hasLock;        // native lock exists (containers: positive difficulty)
+    int   state;          // raw DoorState, or -1 for a lockable container
     int   gate;           // isGate() != 0 (town gates ride the same channel)
     char  name[40];       // GameData name (diagnostics)
     // Protocol 28: the door-to-building link. A door on a PLACED building has
@@ -1810,18 +1818,16 @@ struct DoorRead {
     unsigned int parentHand[5]; // owning Building's hand (all-zero = no parent)
     int   doorIndex;            // position in parent->doors (-1 = no parent)
 };
-// SEH-guarded enumeration of doors among BUILDING objects within radius of the
-// interest centers (dual-interest, deduped). Returns the count written.
-unsigned int enumDoorsNear(GameWorld* gw, float radius, DoorRead* out, unsigned int maxOut);
-// SEH-guarded single-door read by hand. Returns false when the hand does not
-// resolve locally or is not a door.
+// SEH-guarded BUILDING census; doorsOnly=true keeps door-specific scenarios
+// from choosing a chest. The sampled lock channel passes false.
+unsigned int enumDoorsNear(GameWorld* gw, float radius, DoorRead* out, unsigned int maxOut,
+                           bool doorsOnly);
+// Reads either a real door or a lockable container; rejects other hand types.
 bool readDoorByHand(const unsigned int dHand[5], DoorRead* out);
-// SEH-guarded door write through the engine's own action entries:
-// openDoor/closeDoor (the polite path - animation, navmesh, sound), falling
-// back to _forceDoorOpenUT/_forceDoorClosedUT when the polite call refuses;
-// lockDoor/unlockDoor for the lock bit (skipped when the door has no lock).
-// wantLocked < 0 leaves the lock untouched. Returns false on resolve failure
-// or fault; *outAfter reports the post-write DoorRead when non-null.
+// Real doors use native open/close and lock/unlock actions. Containers change
+// only the lock flag whose ABI is derived from the native unlock entry.
+// wantOpen < 0 leaves openness untouched; containers ignore openness.
+// wantLocked < 0 leaves a door lock untouched (not a container operation).
 bool writeDoorByHand(const unsigned int dHand[5], int wantOpen, int wantLocked,
                      DoorRead* outAfter);
 

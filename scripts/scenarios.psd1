@@ -1154,6 +1154,28 @@
             Tier = 'full'; WanVariant = $false
         }
 
+        # Real native ownership, NPC combat targets, and paired blood after handoff.
+        recruit_combat = @{
+            Save = 'sync'; Setup = ''; Tolerance = 1.5
+            PrimaryGate = 'recruit_authority'; Gating = @('recruit_authority')
+            Advisory = @(); Tier = 'full'; WanVariant = $true; Seconds = 150
+        }
+        recruit_combat_alias = @{
+            Save = 'sync'; Setup = ''; Tolerance = 1.5
+            PrimaryGate = 'recruit_authority'; Gating = @('recruit_authority')
+            Advisory = @(); Tier = 'full'; WanVariant = $true; Seconds = 150
+        }
+        recruit_handoff_pending = @{
+            Save = 'sync'; Setup = ''; Tolerance = 1.5
+            PrimaryGate = 'recruit_authority'; Gating = @('recruit_authority')
+            Advisory = @(); Tier = 'full'; WanVariant = $true; Seconds = 150
+        }
+        own_tab_return = @{
+            Save = 'sync'; Setup = ''; Tolerance = 1.5
+            PrimaryGate = 'own_tab_return'; Gating = @('own_tab_return')
+            Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 120
+        }
+
         # faction_probe: faction-relation phase-0 diagnostic (protocol 24 -
         # factionSync forced OFF; the affectRelations detours stay on for
         # cause-attribution evidence). Both sides log a 1 Hz FACREL series
@@ -1239,6 +1261,12 @@
             Gating   = @('door_sync', 'clock_sync')
             Advisory = @('smoothness', 'anim_truth', 'march')
             Tier = 'full'; WanVariant = $false
+        }
+        chest_lock = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
+            Save = 'squad2'; Setup = ''; Tolerance = 3.0
+            PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
+            Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 100
         }
 
         # build_probe: placed-building phase-0 diagnostic (protocol 27 -
@@ -2001,59 +2029,88 @@
 
         # ---- inventory ---------------------------------------------------------------
         critical_ground = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1'; KENSHICOOP_WORLD_SYNC = '1' }
             Save = 'squad2'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
             Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 140
         }
         critical_stock = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
             Save = 'squad2'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
             Advisory = @(); Tier = 'full'; WanVariant = $true; Seconds = 140
         }
         critical_npc = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
             Save = 'squad2'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
             Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 140
         }
         critical_vendor = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
             Save = 'squad2'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
             Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 140
         }
         critical_workstation = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
             Save = 'squad2'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
             Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 140
         }
         critical_ore = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
             Save = 'mine1'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
             Advisory = @(); Tier = 'full'; WanVariant = $true; Seconds = 140
         }
         critical_ore_split = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
+            Save = 'mine1'; Setup = ''; Tolerance = 3.0
+            PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
+            Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 140
+        }
+        critical_ore_pending = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1'; KENSHICOOP_WORLD_SYNC = '1' }
             Save = 'mine1'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
             Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 140
         }
         critical_shops_squin = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
             Save = 'squad1'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
             Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 140
         }
         critical_shops_waystation = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
             Save = 'squad1'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
             Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 140
         }
         critical_bag = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
             Save = 'squad2'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
             Advisory = @(); Tier = 'full'; WanVariant = $true; Seconds = 140
         }
         critical_bag_take = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
             Save = 'squad2'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
             Advisory = @(); Tier = 'full'; WanVariant = $true; Seconds = 140
+        }
+        critical_bag_hold = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
+            Save = 'squad2'; Setup = ''; Tolerance = 3.0
+            PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
+            Advisory = @(); Tier = 'full'; WanVariant = $true; Seconds = 140
+        }
+        critical_bag_nested_reserved = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
+            Save = 'squad2'; Setup = ''; Tolerance = 3.0
+            PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
+            Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 140
         }
         inv_order = @{
             DiagEnv = @{ KENSHICOOP_INV_SYNC = '1' }

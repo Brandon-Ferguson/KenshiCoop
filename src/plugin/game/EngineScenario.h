@@ -19,9 +19,19 @@ class GameWorld;
 class Character;
 class RootObject;
 class Faction;
+class Item;
 
 namespace coop {
 namespace engine {
+
+#ifdef KENSHICOOP_HARNESS
+// Native cursor lifetime: a real remove and later add, across separate game ticks.
+Item* holdInventoryBag(GameWorld* gw, const unsigned int source[5], const char* sid);
+bool putHeldInventoryBag(GameWorld* gw, const unsigned int destination[5], Item* bag);
+// Actual native identity of the first carried bag, for native nested-add scenarios.
+bool inventoryBagHand(GameWorld* gw, const unsigned int carrier[5], unsigned int out[5]);
+#endif
+
 
 // ---- Deterministic test-scene setup (host-side; baked into a save) ---------
 // These spawn objects into the live world so the user can SAVE the result. Once

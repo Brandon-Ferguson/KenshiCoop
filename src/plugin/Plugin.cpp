@@ -82,6 +82,10 @@ static int coopInvOwnerClass(const unsigned int h[5]) {
     return g_repl.ownerClassForHand(h);
 }
 
+static bool coopInvAuthority(const unsigned int h[5]) {
+    return !g_net.isRunning() || !g_cfg.xferSync || g_repl.ownsInventoryLocalHand(h);
+}
+
 // assault_mint's victim query (ScenarioContext::pickMintedProxy). Same shape and
 // same reason as the classifier above: the scenario layer must not know about the
 // Replicator, and only the Replicator knows which local bodies are mints.
@@ -1695,6 +1699,12 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         g_repl.applyEvents(gw, g_inbound);
     }
     if (worldLive) {
+        // Reliable recruit edges precede moves of those same bodies.
+        if (g_cfg.recruitSync)
+            g_repl.publishRecruits(gw, g_net, g_net.localId());
+        // Resolve roster ownership before the census permanently decides new tabs.
+        if (g_cfg.squadSync)
+            g_repl.publishSquadMoves(gw, g_net, g_net.localId());
         g_repl.publishOwned(gw, g_net, g_net.localId());
         // Phase W2: BOTH clients watch their OWNED characters for a WEAPON drop and author a
         // reliable conservation intent so the peer relocates its own copy of that weapon (a
@@ -1716,6 +1726,8 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // owned-character census above and loop.
         if (g_cfg.worldSync)
             g_repl.reconcileGroundGear(gw);
+        // Transfer commits must converge even when ordinary inventory sync is disabled.
+        g_repl.publishDeferredInventoryCommits(gw, g_net, g_net.localId());
         // Both clients stream the contents of every squad member they OWN (host tab 0,
         // join tab 1) on content-change - bidirectional, disjoint by the same tab
         // partition as positional sync. Gated on invSync so ordinary co-op sessions add
@@ -1769,21 +1781,7 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
             g_repl.publishMoneyPool(replCtx(gw));
             g_repl.applyMoneyPool(replCtx(gw));
         }
-        // Recruitment sync (protocol 23): drain the recruit detour's edge queue
-        // into reliable EVT_RECRUIT events (subject = old hand, actor = new
-        // hand) and pin recruited hands to their recruiter's ownership. The
-        // receive half (re-key) lives in applyEvents above. Ordered after
-        // publishOwned so this tick's recruits pin BEFORE next tick's census.
-    if (g_cfg.recruitSync)
-        g_repl.publishRecruits(gw, g_net, g_net.localId());
 
-    // Squad management sync (protocol 35): poll the roster's pointer->hand
-    // baseline (~2 Hz; a squad-tab move re-containers the body but the
-    // Character* survives) and author reliable EVT_SQUAD_MOVE re-key edges,
-    // pinning moved hands to the mover's ownership. The receive half (shared
-    // EVT_RECRUIT re-key path) lives in applyEvents above.
-    if (g_cfg.squadSync)
-        g_repl.publishSquadMoves(gw, g_net, g_net.localId());
 
     // Change-gated sampled channels (Phase 6c): faction relations (protocol 24),
     // baked doors (26), placed buildings (27), placed-building doors (28),
@@ -1932,9 +1930,9 @@ void tickReplicateApply(GameWorld* gw, bool worldLive) {
             // Capture this frame's completed UI actions before stale snapshots can apply.
             g_repl.detectAndPublishTransfers(gw,g_net,g_net.localId());
             g_repl.applyTransfers(gw, g_inbound, g_net, g_net.localId());
-            // Rejected units are physically returned, including owned pockets and bag contents.
-            g_repl.applyXferAcks(gw, g_inbound, g_net.localId());
         }
+        // Also drain irrelevant verdicts when transfer sync is disabled.
+        g_repl.applyXferAcks(gw, g_net.localId());
         // Phase 4a: reconcile any peer-owned container we received a fresh snapshot
         // for (the join applies the host's container; the host skips its own).
         g_repl.applyInventories(gw);
@@ -2909,7 +2907,7 @@ void installEngineDetours() {
     }
 
     // Exact completed native inventory/equipment moves; the trade veto remains opt-in.
-    coop::engine::setInvOwnerClassifier(&coopInvOwnerClass);
+    coop::engine::setInvOwnerClassifier(&coopInvOwnerClass, &coopInvAuthority);
     coop::engine::setBlockXfer(g_cfg.blockXfer);
     if (g_cfg.xferSync || g_cfg.blockXfer || g_cfg.scenario == "xfer_block") {
         if (coop::engine::installXferBlockHook())

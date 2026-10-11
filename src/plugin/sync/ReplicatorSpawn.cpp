@@ -35,7 +35,7 @@ void Replicator::applySpawnDeadFlag(const Key& k, u8 dead) {
     Driven& d = targets_[k];
     if (dead == SPAWN_BODY_DEAD) { d.deathLatched = true; d.koLatched = true; }
     else                         { d.koLatched = true; }
-    if (ownHands_.find(k) != ownHands_.end()) return;
+    if (ownHands_.count(k) || pinOwned_.count(k)) return;
     Character* who = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
     if (!who) {
         std::map<Key, Character*>::iterator px = proxyByKey_.find(k);
@@ -150,7 +150,7 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
             pkt.hType = rq.hType; pkt.hContainer = rq.hContainer;
             pkt.hContainerSerial = rq.hContainerSerial;
             pkt.hIndex = rq.hIndex; pkt.hSerial = rq.hSerial;
-            Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+            Character* c = resolveEventChar(k);
             bool dead = false;
             float age = 0.0f;
             bool found = c && engine::describeCharacter(
@@ -717,8 +717,12 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
         // member on this client too (same as the ok=1 path) and retire the
         // force-REQ. Only force-REQ hands become members: an ordinary world-NPC
         // census mint must NOT be dropped into the player squad.
-        if (forceReqHands_.erase(k))
-            insertPeerMember(gw, proxy, k, "recruit");
+        std::map<Key, bool>::iterator handoff = forceReqHands_.find(k);
+        if (handoff != forceReqHands_.end()) {
+            bool ownIt = handoff->second;
+            insertPeerMember(gw, proxy, k, "recruit", ownIt);
+            forceReqHands_.erase(handoff);
+        }
         it = spawnInfoPend_.erase(it);
     }
 
@@ -729,13 +733,19 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
     // bypassed) every pass until they bind a proxy or resolve locally, so the
     // recruited body appears regardless of distance.
     if (!forceReqHands_.empty()) {
-        for (std::set<Key>::iterator it = forceReqHands_.begin();
+        for (std::map<Key, bool>::iterator it = forceReqHands_.begin();
              it != forceReqHands_.end(); ) {
-            const Key& k = *it;
-            bool bound = proxyByKey_.find(k) != proxyByKey_.end();
-            Character* local = bound ? 0
+            const Key& k = it->first;
+            std::map<Key, Character*>::iterator bound = proxyByKey_.find(k);
+            Character* local = bound != proxyByKey_.end() ? bound->second
                 : engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
-            if (bound || local) { forceReqHands_.erase(it++); continue; }
+            if (local) {
+                bool ownIt = it->second;
+                if (!ownIt) { proxyByKey_[k] = local; canonicalOf_[local] = k; }
+                insertPeerMember(gw, local, k, "squad", ownIt);
+                forceReqHands_.erase(it++);
+                continue;
+            }
             UnresolvedHand& uh = unresolvedHands_[k];
             uh.fromCensus = true; // bypass send-side proximity
             uh.forceReq   = true; // correlated by the reliable edge: skip dupe guard
@@ -883,7 +893,7 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                 else d.koLatched = true;
                 // Latch used to wait for applyTargets, which never ran on an
                 // unstreamed NPC - join local AI stood the host's corpse.
-                if (ownHands_.find(k) == ownHands_.end()) {
+                if (!ownHands_.count(k) && !pinOwned_.count(k)) {
                     // Was an inline proxy lookup that handed back the CACHED
                     // pointer; resolveEventChar does the same remap but re-asks
                     // the engine, so a proxy whose block unloaded reads as gone
@@ -921,7 +931,7 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                 // severed item - the world-item channel owns the ground copy).
                 // Never on a body we own (our sim is the authority there), and
                 // idempotent: applyLimbStates no-ops when states already match.
-                if (ownHands_.find(k) != ownHands_.end()) break;
+                if (ownHands_.count(k) || pinOwned_.count(k)) break;
                 int limb = (int)ev.arg;
                 if (limb < 0 || limb > 3) break;
                 Character* c = resolveEventChar(k);
@@ -1019,8 +1029,8 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                 // for those our engine did the real placement and this event
                 // is just the echo of our own edge.
                 if (!furnSync_) break;
-                if (ownHands_.find(k) != ownHands_.end()) {
-                    Character* own = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+                if (ownHands_.count(k) || pinOwned_.count(k)) {
+                    Character* own = resolveEventChar(k);
                     bool down = own && coop::bodyIsDown(engine::readBodyState(own));
                     engine::FurnitureRead ofr;
                     bool already = own && engine::readFurniture(own, &ofr) &&
@@ -1060,7 +1070,7 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                 // The inverse: release the local occupant. Idempotent - a copy
                 // that never entered locally (lost/late enter) is a no-op success.
                 if (!furnSync_) break;
-                if (ownHands_.find(k) != ownHands_.end()) break;
+                if (ownHands_.count(k) || pinOwned_.count(k)) break;
                 Character* occ = resolveEventChar(k); // same remap as ENTER above
                 unsigned int fh[5] = { ev.aType, ev.aContainer, ev.aContainerSerial,
                                        ev.aIndex, ev.aSerial };
@@ -1210,6 +1220,8 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
     // from any batch or reply still in flight for the dead key.
     targets_.erase(oldK);
     spawnReq_.erase(oldK);
+    forceReqHands_.erase(oldK);
+    unresolvedHands_.erase(oldK);
     rekeyedOld_[oldK] = nowMs();
     if (carryDeath || carryKo) {
         Driven& nd = targets_[newK]; // stream fills interp; we seed only the latch
@@ -1241,8 +1253,11 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
     int repaired = 0, culled = -1;
     std::map<Key, Character*>::iterator ex = proxyByKey_.find(newK);
     if (ex != proxyByKey_.end()) {
-        if (!c || ex->second == c) {
+        Character* rebound = resolveEventChar(newK);
+        if (rebound && (!c || rebound == c)) {
             // True rebound (duplicate event delivery / already migrated).
+            insertPeerMember(gw, rebound, newK, tag, destOwned);
+            forceReqHands_.erase(newK);
             char db[160]; _snprintf(db, sizeof(db) - 1,
                 "[%s] REKEY new=%u,%u,%u,%u,%u ok=1 rebound=1",
                 tag, newK.t, newK.c, newK.cs, newK.i, newK.s);
@@ -1328,29 +1343,6 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
         // tab-aware, so a squad-move re-containers an existing member too.
         insertPeerMember(gw, c, newK, tag, destOwned);
         if (destOwned) {
-            // Control hand-off: drop every residual DRIVE artifact so publishOwned
-            // streams the body immediately and applyTargets never fights our own
-            // now-owned copy. canonicalOf_ is keyed by Character* (the stamp that
-            // otherwise keeps the drive-exclusion guard active for a full
-            // drivenSeen_ horizon); targets_/spawnReq_ hold the peer stream state.
-            canonicalOf_.erase(c);
-            targets_.erase(oldK);  targets_.erase(newK);
-            spawnReq_.erase(oldK); spawnReq_.erase(newK);
-            // Phantom-mint suppression: stamp the CLAIMED hand into the re-keyed
-            // grace so any batch/INFO reply for newK already in flight (the host
-            // was streaming it until this instant) neither REQs nor mints. The
-            // pinOwned_ vetoes above are the primary guard; this covers the
-            // window before the pin is first consulted next tick.
-            rekeyedOld_[newK] = nowMs();
-            // Heal an already-minted phantom: a prior flip (or a lost race) may
-            // have bound a proxy under newK. We own the hand now, so despawn the
-            // stray proxy and drop its binding (manual 2026-07-17: Squint).
-            std::map<Key, Character*>::iterator px = proxyByKey_.find(newK);
-            if (px != proxyByKey_.end()) {
-                if (px->second && px->second != c)
-                    destroyIfMinted(gw, px->second);
-                proxyByKey_.erase(px);
-            }
             char cf[176]; _snprintf(cf, sizeof(cf) - 1,
                 "[%s] CONTROL-FLIP claim new=%u,%u,%u,%u,%u (now owned)",
                 (tag ? tag : "squad"), newK.t, newK.c, newK.cs, newK.i, newK.s);
@@ -1365,7 +1357,7 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
         // squad never REQs and the body never mints. Enroll the new hand in the
         // force-REQ set: the reliable edge PROVES it is a legit host body, so we
         // REQ it regardless of distance (the reply-side mint gate still judges).
-        forceReqHands_.insert(newK);
+        forceReqHands_[newK] = destOwned;
         char fb[176]; _snprintf(fb, sizeof(fb) - 1,
             "[%s] REKEY-FALLBACK new=%u,%u,%u,%u,%u force-REQ (no local body)",
             tag, newK.t, newK.c, newK.cs, newK.i, newK.s);
@@ -1382,6 +1374,11 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
 void Replicator::insertPeerMember(GameWorld* gw, Character* c, const Key& newK,
                                   const char* tag, bool ownIt) {
     if (!c) return;
+    // Preserve queued user moves before the SDK mutation. A new roster pointer
+    // is only seeded, while an admitted body yields the exact native edge.
+    engine::pollSquadRoster(gw);
+    unsigned int beforeH[5];
+    bool haveBefore = engine::readObjectHand(reinterpret_cast<RootObject*>(c), beforeH);
     unsigned int nh[5] = { newK.t, newK.c, newK.cs, newK.i, newK.s };
     bool mintedTab = false;
     if (!ownIt) {
@@ -1454,24 +1451,38 @@ void Replicator::insertPeerMember(GameWorld* gw, Character* c, const Key& newK,
     // readObjectHand re-reads post-move in Key order [type,container,
     // containerSerial,index,serial].
     if (ownIt) { pinOwned_.insert(newK); pinPeer_.erase(newK); }
-    // The re-container we just performed will surface as a roster MOVE edge on
-    // the next poll. Claim it as ours-to-ignore before publishSquadMoves can
-    // read it as a user action and publish it (see moveEcho_).
-    if (ok) moveEcho_[newK.s] = nowMs();
     unsigned int lh[5] = { 0, 0, 0, 0, 0 };
     bool haveLh = false;
     __try {
         haveLh = engine::readObjectHand(reinterpret_cast<RootObject*>(c), lh);
     } __except (EXCEPTION_EXECUTE_HANDLER) { haveLh = false; }
     Key lk; lk.t = lh[0]; lk.c = lh[1]; lk.cs = lh[2]; lk.i = lh[3]; lk.s = lh[4];
+    if (haveBefore && haveLh) {
+        Key before; before.t = beforeH[0]; before.c = beforeH[1]; before.cs = beforeH[2];
+        before.i = beforeH[3]; before.s = beforeH[4];
+        if (!(before == lk)) moveEcho_[before] = std::make_pair(lk, nowMs());
+    }
     bool sameAsNew = (lk.t == newK.t && lk.c == newK.c && lk.cs == newK.cs &&
                       lk.i == newK.i && lk.s == newK.s);
     bool pinnedLocal = false;
     if (haveLh && (lh[0] | lh[1] | lh[2] | lh[3] | lh[4]) && !sameAsNew) {
         if (ownIt) { pinPeer_.erase(lk); pinOwned_.insert(lk); }
         else       { pinOwned_.erase(lk); pinPeer_.insert(lk); }
-        if (ok) moveEcho_[lk.s] = nowMs();  // the engine may renumber the serial
         pinnedLocal = true;
+    }
+    if (ownIt && haveLh) {
+        if (!sameAsNew) publishAsWire_[lk] = newK;
+        else publishAsWire_.erase(lk);
+        canonicalOf_.erase(c);
+        drivenSeen_.erase(c);
+        targets_.erase(newK);
+        spawnReq_.erase(newK);
+        rekeyedOld_[newK] = nowMs();
+        std::map<Key, Character*>::iterator px = proxyByKey_.find(newK);
+        if (px != proxyByKey_.end()) {
+            if (px->second && px->second != c) destroyIfMinted(gw, px->second);
+            proxyByKey_.erase(px);
+        }
     }
     if (!ownIt && haveLh) {
         peerTabAlias_[std::make_pair(newK.c, newK.cs)] =

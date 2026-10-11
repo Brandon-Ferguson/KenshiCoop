@@ -184,10 +184,11 @@ public:
     // relocates the real item between its own copies of the two containers.
     void queueInvXfer(const InvXferPacket& pkt, std::vector<InvItemEntry>& contents);
 
-    // MAIN thread: queue the reliable VERDICT for an intent we just applied
-    // (protocol 50) - how many units actually landed here.
+    // MAIN thread: queue the canonical endpoint snapshot and its verdict in the same
+    // FIFO as normal inventory snapshots, preserving capture order on CH_RELIABLE.
     void queueInvXferAck(const InvXferAckPacket& pkt,
-                         const std::vector<InvItemEntry>& contents);
+                        const std::vector<InvItemEntry>& contents,
+                        const InvSnapshotHeader& snapshot, const InvItemEntry* items);
 
     // MAIN thread: queue a reliable owner-authoritative medical snapshot (phase 2,
     // player-squad only). Change-gated by the caller so the channel stays quiet.
@@ -369,13 +370,16 @@ private:
     // serialized by the net thread. Variable-length, so each carries its own item
     // list. Guarded by outCs_.
     struct OutInv {
-        u32                       ownerId;
-        u8                        keyKind; // protocol 34: 0 raw hand, 1 placer key
-        u8                        flags;   // protocol 46: INV_FLAG_TRUNCATED
-        u32                       cKey[5];
+        InvSnapshotHeader header;
         std::vector<InvItemEntry> items;
     };
-    std::vector<OutInv>      outInv_;
+    struct OutInventory {
+        OutInv snapshot;
+        InboundInvXferAck verdict;
+        bool hasVerdict;
+    };
+    std::deque<OutInventory> outInv_;
+    void sendInvSnapshot(const OutInv& snapshot);
     // Reliable world-item snapshots / culls queued by the main thread (Phase W1),
     // drained + serialized by the net thread. Guarded by outCs_.
     struct OutWorldItems { u32 ownerId; std::vector<WorldItemEntry> items; };
@@ -393,8 +397,6 @@ private:
     std::vector<WorldPickupPacket> outWorldPickups_;
     // Reliable cross-owner transfer intents (protocol 37). Guarded by outCs_.
     std::deque<InboundInvXfer> outInvXfers_;
-    // Reliable transfer verdicts (protocol 50). Guarded by outCs_.
-    std::deque<InboundInvXferAck> outInvXferAcks_;
     // Reliable medical snapshots + treatment deltas (phase 2). Guarded by outCs_.
     std::vector<MedicalPacket>   outMedical_;
     std::vector<TreatmentPacket> outTreatments_;

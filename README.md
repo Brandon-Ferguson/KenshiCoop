@@ -37,6 +37,27 @@
 - **Фикс вылета на луте.** Удаление предмета при открытом окне инвентаря
   освобождало память, на которую окно продолжало ссылаться, и игра падала на
   своём рендер-потоке. Теперь применение откладывается, пока окно открыто.
+- **Общий замок сундука.** Состояние замка передаётся вместе с изменениями
+  дверей: разблокировка клиентом видна хосту и наоборот. Хост передаёт текущие
+  замки при подключении; неизменившиеся состояния не пересылаются по таймеру,
+  чтобы старый повтор не отменял новую разблокировку.
+- **Подбор без окна для дублирования.** Предмет из чужого инвентаря нельзя
+  выбросить, использовать или передать дальше до решения его владельца.
+  Подтверждение сопровождается текущим содержимым общего слота, поэтому
+  отклонённый подбор не оставляет копию до следующего периодического обновления.
+- **Обмен без потери рюкзака.** Пока рюкзак держат курсором или передача ждёт
+  подтверждения, неполный снимок не удаляет его копию у другого игрока.
+  После завершения обмена отправляется полный инвентарь, даже если периодическая
+  синхронизация отключена. Рюкзак с неподтверждённым предметом внутри нельзя
+  передать дальше; откат возвращает именно переданный экземпляр.
+- **Один владелец персонажа после передачи.** Передача в отряд клиента снимает
+  публикацию его собственного состояния и здоровья у хоста. Различающиеся
+  локальные ID не ломают цели боя NPC и применение здоровья. Служебная смена
+  отряда распознаётся по фактической паре ID «до → после», включая serial,
+  и не отправляется обратно как действие игрока. Возврат персонажа в свой
+  отряд сохраняет управление, даже если там находятся персонажи другого игрока.
+  Если тело ещё не загружено, отложенное создание сохраняет назначенного
+  владельца и связывает новый локальный ID с сетевым.
 - **3–4 игрока.** В коде есть (хост + до 3 подключений). В реальных сессиях пока
   не проверено — считайте непротестированным.
 
@@ -219,6 +240,27 @@ shared save, streamed to both machines automatically.
 - **Loot crash fix.** Destroying an item while an inventory panel had it open
   freed memory the open window still pointed at, and the game died on its render
   thread. The reconcile now defers while a panel is open instead.
+- **Shared chest locks.** Container-lock changes use the reliable door channel,
+  so an unlock on either peer reaches the other. The host sends current locks
+  when a peer connects; unchanged states are not periodically retransmitted,
+  preventing a stale resend from undoing a newer unlock.
+- **No speculative-pickup duplication window.** Items taken from another owner's
+  inventory cannot be dropped, consumed or moved onward before its verdict.
+  The verdict follows the current authoritative inventory snapshot, so a rejected
+  pickup does not leave a phantom until the next periodic refresh.
+- **Backpack exchange conservation.** A bag held by the cursor or awaiting a
+  transfer verdict is not deleted by an incomplete peer snapshot. Settlement
+  sends the full inventory even with periodic inventory publishing disabled.
+  A bag containing a provisional item cannot be transferred onward; rollback
+  returns the actual transferred bag rather than another copy of its template.
+- **One character author after handoff.** Moving a character into the Client's
+  squad stops the Host from publishing it as its own or authoring its medical
+  state. Native/wire identity differences are respected for NPC combat targets
+  and health application. Replication-induced squad moves use the actual full
+  before/after native identities, including changed serials, rather than being
+  echoed as user actions. Returning to an owned mixed squad retains control.
+  If the body is not loaded yet, deferred creation retains the assigned owner
+  and binds the new native identity to its wire identity.
 - **3–4 players.** Present in the code (host + up to 3 joins). Not validated in
   real sessions yet — treat it as untested.
 

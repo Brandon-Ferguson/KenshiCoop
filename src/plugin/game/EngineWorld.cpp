@@ -172,9 +172,16 @@ int probeRecruit(GameWorld* gw, bool runtimeSubject,
     if (!gw || !gw->player) return -1;
     Character* subject = 0;
     if (runtimeSubject) {
-        // Runtime leg: a freshly-minted NPC (host-only hand - the spawn-sync
-        // regime). Offset to the side so the two legs don't stack bodies.
-        subject = spawnNpcInFront(gw, 5.0f, 2.5f);
+        // A recruit fixture must begin outside the player faction. The generic
+        // editor spawn can already belong to the player's default platoon.
+        unsigned int fresh[1][5] = { 0 };
+        if (spawnRuntimeSquad(gw, 1, fresh) == 1)
+            subject = resolveCharByHand(fresh[0][3], fresh[0][4], fresh[0][0],
+                fresh[0][1], fresh[0][2]);
+        if (subject && isPlayerSquad(gw, static_cast<RootObject*>(subject))) {
+            coop::logLine("[recruit] probe fixture refused player-faction spawn");
+            return 0;
+        }
     } else {
         // Baked leg: the nearest world NPC (save-stable hand both clients
         // share - the bar-recruit regime). First non-player body in 60 u.
@@ -401,47 +408,76 @@ unsigned int drainFactionDeltas(FactionDelta* out, unsigned int maxOut) {
 
 // ---- Protocol 26: door/gate state --------------------------------------------
 
-// Fill a DoorRead from a live door Building. Callers hold the SEH frame.
-// `open` collapses the animated DoorState: a door in motion reports its
-// DESTINATION (OPENING = open, CLOSING = closed) so the channel never
-// publishes the transient mid-swing state.
-static void fillDoorRead(DoorStuff* d, DoorRead* r) {
+// DoorLock is opaque in KenshiLib. Derive its engaged-flag offset from the
+// resolved native unlockDoor entry instead of assuming a chest is DoorStuff.
+// Kenshi 1.0.65: mov rax,[rcx+370h]; mov byte ptr [rax+20h],0.
+// Reject a different instruction layout rather than writing an unverified ABI.
+static int buildingLockFlagOffset() {
+    static int offset = -2;
+    if (offset != -2) return offset;
+    if (!g_doorUnlockFn) return -1;
+    const unsigned char* code = reinterpret_cast<const unsigned char*>(g_doorUnlockFn);
+    static const unsigned char receiver[] = { 0x48, 0x8b, 0x81, 0x70, 0x03, 0, 0 };
+    offset = -1;
+    if (memcmp(code, receiver, sizeof(receiver)) == 0 &&
+        code[7] == 0xc6 && code[8] == 0x40 && code[10] == 0)
+        offset = code[9];
+    else
+        coop::logLine("[door] container lock ABI unavailable: native unlock layout differs");
+    return offset;
+}
+
+static DoorLock* containerDoorLock(Building* b) {
+    if (!b || b->imADoor || buildingLockFlagOffset() < 0) return 0;
+    DoorLock* lock = b->getDoorLock();
+    // Native DoorStuff::isLocked also requires positive lock difficulty.
+    return lock && *reinterpret_cast<const int*>(lock) > 0 ? lock : 0;
+}
+
+// One row for the door/lock channel. Only real doors have openness, a door
+// index, or a DoorStuff layout; a chest carries just its native DoorLock.
+// Callers hold the SEH frame.
+static void fillDoorRead(Building* b, DoorRead* r, DoorLock* containerLock = 0) {
     memset(r, 0, sizeof(*r));
-    readObjectHand(static_cast<RootObject*>(d), r->hand);
-    Ogre::Vector3 p = d->getPosition();
+    readObjectHand(static_cast<RootObject*>(b), r->hand);
+    Ogre::Vector3 p = b->getPosition();
     r->x = p.x; r->y = p.y; r->z = p.z;
-    DoorState st = d->state;
-    r->state   = (int)st;
-    r->open    = (st == DOORSTATE_OPEN || st == DOORSTATE_OPENING) ? 1 : 0;
-    r->hasLock = d->doorLock ? 1 : 0;
-    r->locked  = (r->hasLock && g_doorIsLockedFn && g_doorIsLockedFn(d)) ? 1 : 0;
-    r->gate    = 0; // filled by the caller (isGate is a virtual we avoid here)
-    // Protocol 28: the door-to-building link. parent + the index in the
-    // parent's ordered `doors` list give a placed door its translatable wire
-    // identity (the runtime door hand itself never crosses usefully).
+    r->state = -1;
     r->doorIndex = -1;
-    Building* par = d->parent;
-    if (par) {
-        readObjectHand(static_cast<RootObject*>(par), r->parentHand);
-        unsigned int nd = par->doors.size();
-        for (unsigned int i = 0; i < nd; ++i) {
-            if (par->doors[i] == static_cast<Building*>(d)) {
-                r->doorIndex = (int)i;
-                break;
+    if (b->imADoor) {
+        DoorStuff* d = static_cast<DoorStuff*>(b);
+        DoorState st = d->state;
+        r->state = (int)st;
+        r->open = (st == DOORSTATE_OPEN || st == DOORSTATE_OPENING) ? 1 : 0;
+        r->hasLock = d->doorLock ? 1 : 0;
+        r->locked = (r->hasLock && g_doorIsLockedFn && g_doorIsLockedFn(d)) ? 1 : 0;
+        Building* par = d->parent;
+        if (par) {
+            readObjectHand(static_cast<RootObject*>(par), r->parentHand);
+            unsigned int nd = par->doors.size();
+            for (unsigned int i = 0; i < nd; ++i) {
+                if (par->doors[i] == b) {
+                    r->doorIndex = (int)i;
+                    break;
+                }
             }
         }
+    } else if (containerLock) {
+        r->hasLock = 1;
+        r->locked = reinterpret_cast<const unsigned char*>(containerLock)[buildingLockFlagOffset()] ? 1 : 0;
     }
-    GameData* gd = d->getGameData();
+    GameData* gd = b->getGameData();
     if (gd) {
         strncpy(r->name, gd->name.c_str(), sizeof(r->name) - 1);
         r->name[sizeof(r->name) - 1] = '\0';
         // Town gates are DoorStuff too; the name carries the distinction well
         // enough for diagnostics without touching the isGate vtable slot.
-        r->gate = ciContains(r->name, "gate") ? 1 : 0;
+        r->gate = b->imADoor && ciContains(r->name, "gate") ? 1 : 0;
     }
 }
 
-unsigned int enumDoorsNear(GameWorld* gw, float radius, DoorRead* out, unsigned int maxOut) {
+unsigned int enumDoorsNear(GameWorld* gw, float radius, DoorRead* out, unsigned int maxOut,
+                           bool doorsOnly) {
     if (!gw || !out || maxOut == 0 || !g_getObjsFn || !g_doorIsOpenFn) return 0;
     unsigned int n = 0;
     __try {
@@ -456,8 +492,9 @@ unsigned int enumDoorsNear(GameWorld* gw, float radius, DoorRead* out, unsigned 
                 RootObject* o = g_npcQuery[i];
                 if (!o) continue;
                 Building* b = static_cast<Building*>(o);
-                if (!b->imADoor) continue;
-                DoorStuff* d = static_cast<DoorStuff*>(b);
+                if (doorsOnly && !b->imADoor) continue;
+                DoorLock* lock = b->imADoor ? 0 : containerDoorLock(b);
+                if (!b->imADoor && !lock) continue;
                 unsigned int h[5];
                 if (!readObjectHand(o, h)) continue;
                 bool dup = false; // the two interest spheres can overlap
@@ -465,7 +502,7 @@ unsigned int enumDoorsNear(GameWorld* gw, float radius, DoorRead* out, unsigned 
                     if (out[k].hand[3] == h[3] && out[k].hand[4] == h[4] &&
                         out[k].hand[1] == h[1]) { dup = true; break; }
                 if (dup) continue;
-                fillDoorRead(d, &out[n]);
+                fillDoorRead(b, &out[n], lock);
                 ++n;
             }
         }
@@ -474,13 +511,14 @@ unsigned int enumDoorsNear(GameWorld* gw, float radius, DoorRead* out, unsigned 
 }
 
 bool readDoorByHand(const unsigned int dHand[5], DoorRead* out) {
-    if (!dHand || !out) return false;
+    if (!dHand || !out || dHand[0] != (unsigned int)BUILDING) return false;
     RootObject* ro = resolveObjectByHand(dHand);
     if (!ro) return false;
     __try {
         Building* b = static_cast<Building*>(ro);
-        if (!b->imADoor) return false;
-        fillDoorRead(static_cast<DoorStuff*>(b), out);
+        DoorLock* lock = b->imADoor ? 0 : containerDoorLock(b);
+        if (!b->imADoor && !lock) return false;
+        fillDoorRead(b, out, lock);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -488,16 +526,23 @@ bool readDoorByHand(const unsigned int dHand[5], DoorRead* out) {
 bool writeDoorByHand(const unsigned int dHand[5], int wantOpen, int wantLocked,
                      DoorRead* outAfter) {
     if (outAfter) memset(outAfter, 0, sizeof(*outAfter));
-    if (!dHand || !g_doorOpenFn || !g_doorCloseFn) return false;
+    if (!dHand || dHand[0] != (unsigned int)BUILDING) return false;
     RootObject* ro = resolveObjectByHand(dHand);
     if (!ro) return false;
     __try {
         Building* b = static_cast<Building*>(ro);
-        if (!b->imADoor) return false;
+        if (!b->imADoor) {
+            DoorLock* lock = containerDoorLock(b);
+            if (!lock || wantLocked < 0) return false;
+            reinterpret_cast<unsigned char*>(lock)[buildingLockFlagOffset()] = wantLocked ? 1 : 0;
+            if (outAfter) fillDoorRead(b, outAfter, lock);
+            return true;
+        }
+        if (!g_doorOpenFn || !g_doorCloseFn) return false;
         DoorStuff* d = static_cast<DoorStuff*>(b);
         DoorState st = d->state;
         int curOpen = (st == DOORSTATE_OPEN || st == DOORSTATE_OPENING) ? 1 : 0;
-        if (wantOpen != curOpen) {
+        if (wantOpen >= 0 && wantOpen != curOpen) {
             // Polite path first (animation + navmesh + sound - what a local
             // click does); the blunt UT force paths only when it refuses.
             bool ok = wantOpen ? g_doorOpenFn(d) : g_doorCloseFn(d);

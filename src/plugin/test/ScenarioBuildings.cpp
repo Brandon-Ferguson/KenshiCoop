@@ -62,7 +62,7 @@ public:
 private:
     void logCensus(const ScenarioContext& ctx) {
         engine::DoorRead rows[MAX_DOORS];
-        unsigned int n = engine::enumDoorsNear(ctx.gw, 100.0f, rows, MAX_DOORS);
+        unsigned int n = engine::enumDoorsNear(ctx.gw, 100.0f, rows, MAX_DOORS, true);
         char c[96];
         _snprintf(c, sizeof(c) - 1, "SCENARIO DOORCOUNT n=%u t=%lu", n, ctx.elapsedMs);
         c[sizeof(c) - 1] = '\0'; coop::logLine(c);
@@ -85,7 +85,7 @@ private:
     // census has two - two independent crossing legs).
     bool pickSentinel(const ScenarioContext& ctx, unsigned int outHand[5]) {
         engine::DoorRead rows[MAX_DOORS];
-        unsigned int n = engine::enumDoorsNear(ctx.gw, 100.0f, rows, MAX_DOORS);
+        unsigned int n = engine::enumDoorsNear(ctx.gw, 100.0f, rows, MAX_DOORS, true);
         if (n == 0) return false;
         // Selection sort indices by (serial, index) ascending - tiny n.
         unsigned int order[MAX_DOORS];
@@ -140,6 +140,83 @@ private:
     bool          writeOk_;
     unsigned int  censusLogged_;
     unsigned int  sentinelHand_[5];
+};
+
+// Shared stock is not enough: a client's completed lockpick must unlock the
+// same native chest on the host, and host lock changes must cross back.
+class ChestLockScenario : public TimedScenario {
+public:
+    ChestLockScenario() : TimedScenario("chest_lock", 500), have_(false),
+        seeded_(false), unlocked_(false), relocked_(false), finalUnlock_(false),
+        initialOk_(false), clientOk_(false), hostOk_(false), finalOk_(false) {
+        memset(hand_, 0, sizeof(hand_));
+    }
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        engine::ContRead rows[64];
+        unsigned int n = engine::enumContainersNear(ctx.gw, 400.0f, rows, 64);
+        int best = -1;
+        for (unsigned int i = 0; i < n; ++i) {
+            if ((rows[i].classType != 2 && rows[i].classType != 3) || !rows[i].complete) continue;
+            engine::DoorRead lock;
+            if (!engine::readDoorByHand(rows[i].hand, &lock) || !lock.hasLock)
+                continue;
+            if (best < 0 || rows[i].x < rows[best].x ||
+                (rows[i].x == rows[best].x && rows[i].z < rows[best].z) ||
+                (rows[i].x == rows[best].x && rows[i].z == rows[best].z &&
+                 rows[i].y < rows[best].y))
+                best = (int)i;
+        }
+        if (best >= 0) {
+            memcpy(hand_, rows[best].hand, sizeof(hand_));
+            have_ = true;
+        }
+        char b[192]; _snprintf(b, sizeof(b) - 1,
+            "CRIT LOCK ANCHOR host=%d have=%d containers=%u hand=%u.%u.%u.%u.%u",
+            ctx.isHost ? 1 : 0, have_ ? 1 : 0, n,
+            hand_[0], hand_[1], hand_[2], hand_[3], hand_[4]);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (have_) {
+            if (ctx.isHost && !seeded_) {
+                seeded_ = engine::writeDoorByHand(hand_, 0, 1, 0);
+            }
+            if (!ctx.isHost && !unlocked_ && ctx.elapsedMs >= 8000)
+                unlocked_ = engine::writeDoorByHand(hand_, 0, 0, 0);
+            if (ctx.isHost && !relocked_ && ctx.elapsedMs >= 13000)
+                relocked_ = engine::writeDoorByHand(hand_, 0, 1, 0);
+            if (ctx.isHost && !finalUnlock_ && ctx.elapsedMs >= 19000)
+                finalUnlock_ = engine::writeDoorByHand(hand_, 0, 0, 0);
+            engine::DoorRead cur;
+            bool read = engine::readDoorByHand(hand_, &cur);
+            if (ctx.elapsedMs >= 6000 && ctx.elapsedMs < 8000)
+                initialOk_ = read && cur.locked == 1;
+            if (ctx.elapsedMs >= 11000 && ctx.elapsedMs < 13000)
+                clientOk_ = read && cur.locked == 0;
+            if (ctx.elapsedMs >= 16000 && ctx.elapsedMs < 19000)
+                hostOk_ = read && cur.locked == 1;
+            if (ctx.elapsedMs >= 22000)
+                finalOk_ = read && cur.locked == 0;
+            if (evidenceDue(ctx.elapsedMs)) {
+                char b[176]; _snprintf(b, sizeof(b) - 1,
+                    "CRIT LOCK host=%d t=%lu locked=%d initial=%d client=%d hostLeg=%d final=%d",
+                    ctx.isHost ? 1 : 0, ctx.elapsedMs, read ? cur.locked : -1,
+                    initialOk_ ? 1 : 0, clientOk_ ? 1 : 0, hostOk_ ? 1 : 0, finalOk_ ? 1 : 0);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+        if (ctx.elapsedMs < 24000) return false;
+        passed_ = have_ && initialOk_ && clientOk_ && hostOk_ && finalOk_ &&
+                  (ctx.isHost ? (seeded_ && relocked_ && finalUnlock_) : unlocked_);
+        return true;
+    }
+
+private:
+    bool have_, seeded_, unlocked_, relocked_, finalUnlock_;
+    bool initialOk_, clientOk_, hostOk_, finalOk_;
+    unsigned int hand_[5];
 };
 
 // deed_probe (protocol 54 phase 0, probe tier; deedSync forced OFF) /
@@ -598,7 +675,7 @@ public:
 private:
     void logCensus(const ScenarioContext& ctx) {
         engine::DoorRead rows[MAX_DOORS];
-        unsigned int n = engine::enumDoorsNear(ctx.gw, 100.0f, rows, MAX_DOORS);
+        unsigned int n = engine::enumDoorsNear(ctx.gw, 100.0f, rows, MAX_DOORS, true);
         char c[96];
         _snprintf(c, sizeof(c) - 1, "SCENARIO BDOORCOUNT n=%u t=%lu", n, ctx.elapsedMs);
         c[sizeof(c) - 1] = '\0'; coop::logLine(c);
@@ -1504,6 +1581,7 @@ private:
 Scenario* makeBuildingScenario(const std::string& name) {
     if (name == "door_probe")    return new DoorProbeScenario(true);
     if (name == "door_sync")     return new DoorProbeScenario(false);
+    if (name == "chest_lock")    return new ChestLockScenario();
     if (name == "deed_probe")    return new DeedProbeScenario(true);
     if (name == "deed_sync")     return new DeedProbeScenario(false);
     if (name == "build_probe")   return new BuildProbeScenario(true);

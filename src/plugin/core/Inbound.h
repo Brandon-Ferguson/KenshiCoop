@@ -717,8 +717,12 @@ public:
     void drainEvents(std::deque<InboundEvent>& out) {
         EnterCriticalSection(&cs_); out.swap(evt_); LeaveCriticalSection(&cs_);
     }
-    void drainInv(std::deque<InboundInv>& out) {
-        EnterCriticalSection(&cs_); out.swap(inv_); LeaveCriticalSection(&cs_);
+    // A verdict cannot overtake the preceding reliable canonical snapshot.
+    void drainInventory(std::deque<InboundInv>& out,
+                        std::deque<InboundInvXferAck>& verdicts) {
+        EnterCriticalSection(&cs_);
+        out.swap(inv_); verdicts.swap(invXferAck_);
+        LeaveCriticalSection(&cs_);
     }
     void drainWorldItems(std::deque<InboundWorldItems>& out) {
         EnterCriticalSection(&cs_); out.swap(wi_); LeaveCriticalSection(&cs_);
@@ -740,9 +744,6 @@ public:
     }
     void drainInvXfers(std::deque<InboundInvXfer>& out) {
         EnterCriticalSection(&cs_); out.swap(invXfer_); LeaveCriticalSection(&cs_);
-    }
-    void drainInvXferAcks(std::deque<InboundInvXferAck>& out) {
-        EnterCriticalSection(&cs_); out.swap(invXferAck_); LeaveCriticalSection(&cs_);
     }
     void drainMedical(std::deque<InboundMedical>& out) {
         EnterCriticalSection(&cs_); out.swap(med_); LeaveCriticalSection(&cs_);

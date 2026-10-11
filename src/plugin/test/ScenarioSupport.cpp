@@ -51,10 +51,10 @@ void logScenarioEntity(const char* kind, const EntityState& e) {
     char b[256];
     _snprintf(b, sizeof(b) - 1,
               "SCENARIO %s hand=%u,%u,%u,%u,%u pos=%.2f,%.2f,%.2f task=%u "
-              "pelvis=%.2f crouch=%d idle=%d bs=%u",
+              "pelvis=%.2f crouch=%d idle=%d bs=%u ntask=%d",
               kind, e.hIndex, e.hSerial, e.hType, e.hContainer, e.hContainerSerial,
               e.x, e.y, e.z, (unsigned int)e.task, pelvis, crouch, idle,
-              (unsigned int)e.bodyState);
+              (unsigned int)e.bodyState, ptask);
     b[sizeof(b) - 1] = '\0';
     coop::logLine(b);
 }

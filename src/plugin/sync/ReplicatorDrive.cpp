@@ -293,11 +293,7 @@ void Replicator::applyTargets(GameWorld* gw) {
             Driven& d = it->second;
             EntityState out;
             if (!d.interp.latest(&out, 0, 0, 0)) continue;
-            Character* c = engine::resolve(out);
-            if (!c) {
-                std::map<Key, Character*>::iterator pit = proxyByKey_.find(it->first);
-                if (pit != proxyByKey_.end()) c = pit->second;
-            }
+            Character* c = resolveEventChar(it->first);
             if (!c) continue;
             engine::applyRaw(c, out);
             engine::teleportVisual(c, out.x, out.y, out.z, out.heading);
@@ -307,7 +303,7 @@ void Replicator::applyTargets(GameWorld* gw) {
             unsigned short lbs = engine::readBodyState(c);
             // Never force the KO timer on a body we OWN (the Unconscious GUI
             // is that character's medical). Pose-only puppet while thrown.
-            bool own = ownHands_.find(it->first) != ownHands_.end();
+            bool own = ownHands_.count(it->first) || pinOwned_.count(it->first);
             if (!own) {
                 if (pktDown) {
                     if (!coop::bodyIsDown(lbs)) engine::knockDown(c, true);
@@ -1671,15 +1667,22 @@ void Replicator::applyTargets(GameWorld* gw) {
                         d.carryNoSeeTick = 0;
                         unsigned int ch[5];
                         for (int ci = 0; ci < 5; ++ci) ch[ci] = lcr.carried[ci];
+                        Key pk; pk.t = ch[0]; pk.c = ch[1]; pk.cs = ch[2];
+                        pk.i = ch[3]; pk.s = ch[4];
+                        Character* who = engine::resolveCharByHand(
+                            ch[3], ch[4], ch[0], ch[1], ch[2]);
                         bool ok = engine::applyDrop(c, true);
                         char b[144]; _snprintf(b, sizeof(b) - 1,
                             "[carry] HEAL DROP carrier=%u,%u ok=%d",
                             out.hIndex, out.hSerial, ok ? 1 : 0);
                         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
-                        Key pk; pk.t = ch[0]; pk.c = ch[1]; pk.cs = ch[2];
-                        pk.i = ch[3]; pk.s = ch[4];
-                        Character* who = engine::resolveCharByHand(
-                            ch[3], ch[4], ch[0], ch[1], ch[2]);
+                        const Key& wirePassenger = ownedWireKey(pk);
+                        if (&wirePassenger != &pk) pk = wirePassenger;
+                        else if (who) {
+                            std::map<Character*, Key>::const_iterator canonical =
+                                canonicalOf_.find(who);
+                            if (canonical != canonicalOf_.end()) pk = canonical->second;
+                        }
                         settleDroppedBody(pk, who, false, 0, 0, 0, 0, "heal");
                         beginThrown(pk);
                     }
