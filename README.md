@@ -50,6 +50,9 @@
   После завершения обмена отправляется полный инвентарь, даже если периодическая
   синхронизация отключена. Рюкзак с неподтверждённым предметом внутри нельзя
   передать дальше; откат возвращает именно переданный экземпляр.
+- **Синхронизация без ложного захвата курсором.** В `v0.1.31` служебное
+  перемещение экипировки при применении снимка больше не считается началом
+  пользовательского обмена и не блокирует дальнейшее обновление инвентаря.
 - **Один владелец персонажа после передачи.** Передача в отряд клиента снимает
   публикацию его собственного состояния и здоровья у хоста. Различающиеся
   локальные ID не ломают цели боя NPC и применение здоровья. Служебная смена
@@ -60,6 +63,11 @@
   владельца и связывает новый локальный ID с сетевым.
 - **3–4 игрока.** В коде есть (хост + до 3 подключений). В реальных сессиях пока
   не проверено — считайте непротестированным.
+
+Потеря предметов при прямом обмене, разные товары торговцев, рассинхроны
+времени и координат, кровати на втором этаже и боевых анимаций остаются
+открытыми по новым отчётам. `v0.1.31` исправляет отдельную блокировку
+инвентаря, а не все эти случаи.
 
 Всё остальное — работа nhoral. Если вам нужен оригинальный, поддерживаемый мод,
 идите в [nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop).
@@ -73,7 +81,7 @@
 **Первая установка:** из
 [последнего релиза](https://github.com/kotetsyy/KenshiCoop4up/releases/latest)
 скачайте `KenshiCoop-kit.zip` и скопируйте папку `KenshiCoop` в `<Kenshi>\mods\`.
-В архиве только четыре файла; их также можно скачать отдельно в `<Kenshi>\mods\KenshiCoop\`:
+В архиве только четыре файла для `<Kenshi>\mods\KenshiCoop\`:
 
 - `KenshiCoop.dll` — сам плагин
 - `KenshiCoopUI.dll` — нативное окно F2, шрифты и статус сессии
@@ -95,7 +103,7 @@
 
 **Рекомендуем всем одну и ту же сборку.** Разные версии протокола не соединяются.
 
-В сборке Release `v0.1.28` используется протокол **70**. Хост держит симуляцию на паузе
+В сборке Release `v0.1.31` используется протокол **70**. Хост держит симуляцию на паузе
 до загрузки мира всеми подключёнными клиентами: каждый подтверждает READY
 именно для текущего `LOAD_GO`, а не просто окончание передачи файлов.
 Пауза не заменяет выбранную игроками скорость или пользовательскую паузу.
@@ -253,6 +261,9 @@ shared save, streamed to both machines automatically.
   sends the full inventory even with periodic inventory publishing disabled.
   A bag containing a provisional item cannot be transferred onward; rollback
   returns the actual transferred bag rather than another copy of its template.
+- **Snapshot moves are not cursor moves.** In `v0.1.31`, equipment repositioning
+  during snapshot reconciliation no longer looks like a user-initiated transfer
+  or blocks subsequent inventory updates.
 - **One character author after handoff.** Moving a character into the Client's
   squad stops the Host from publishing it as its own or authoring its medical
   state. Native/wire identity differences are respected for NPC combat targets
@@ -263,6 +274,10 @@ shared save, streamed to both machines automatically.
   and binds the new native identity to its wire identity.
 - **3–4 players.** Present in the code (host + up to 3 joins). Not validated in
   real sessions yet — treat it as untested.
+
+New reports of direct-trade item loss, differing merchant stock, time and position
+desynchronization, upstairs beds and combat animations remain open. `v0.1.31`
+fixes a separate inventory-update blockage, not all of those cases.
 
 Everything else is nhoral's work. If you are looking for the original,
 supported mod, go to [nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop).
@@ -277,7 +292,7 @@ addresses.
 **First install:** from the
 [latest release](https://github.com/kotetsyy/KenshiCoop4up/releases/latest),
 download `KenshiCoop-kit.zip` and copy its `KenshiCoop` folder into `<Kenshi>\mods\`.
-The archive contains only four files, also available individually for `<Kenshi>\mods\KenshiCoop\`:
+The archive contains only four files for `<Kenshi>\mods\KenshiCoop\`:
 
 - `KenshiCoop.dll` — the plugin
 - `KenshiCoopUI.dll` — the native F2 window, fonts and session status

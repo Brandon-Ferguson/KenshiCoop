@@ -1618,7 +1618,7 @@ function Test-CriticalInventory {
     $shopSets = @()
     foreach ($file in @($HostFile, $JoinFile)) {
         if (-not (Test-Path $file)) { $ok = $false; continue }
-        $start = Select-String -Path $file -Pattern 'SCENARIO (critical_[a-z_]+|chest_lock) start' |
+        $start = Select-String -Path $file -Pattern 'SCENARIO (critical_[a-z_]+|chest_lock|inv_snapshot_cursor) start' |
             Select-Object -Last 1
         if ($null -eq $start) { $ok = $false; continue }
         $name = $start.Matches[0].Groups[1].Value
@@ -1628,6 +1628,12 @@ function Test-CriticalInventory {
             Select-Object -Last 1
         if ($null -eq $result -or $result.Matches[0].Groups[1].Value -ne 'PASS') {
             $ok = $false
+        }
+        if ($name -eq 'inv_snapshot_cursor') {
+            $role = if ($file -eq $HostFile) { 1 } else { 0 }
+            $move = @(Select-String -Path $file -Pattern "SCENARIO SNAPCUR host=$role changed=1 copies=1 pending=0 sid='[^']+'")
+            if ($move.Count -ne 1) { $ok = $false }
+            continue
         }
         if ($name -eq 'chest_lock') {
             $last = Select-String -Path $file -Pattern 'CRIT LOCK host=\d t=\d+ locked=0 initial=1 client=1 hostLeg=1 final=1' |

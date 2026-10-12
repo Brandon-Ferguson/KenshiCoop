@@ -2028,6 +2028,12 @@
         }
 
         # ---- inventory ---------------------------------------------------------------
+        inv_snapshot_cursor = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
+            Save = 'squad2'; Setup = ''; Tolerance = 3.0
+            PrimaryGate = 'critical_inventory'; Gating = @('critical_inventory')
+            Advisory = @(); Tier = 'full'; WanVariant = $false; Seconds = 90
+        }
         critical_ground = @{
             DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1'; KENSHICOOP_WORLD_SYNC = '1' }
             Save = 'squad2'; Setup = ''; Tolerance = 3.0

@@ -623,3 +623,25 @@ replenishment, native ore production and both backpack transfer directions.
 **Rule.** Preserve the native identity and constructor semantics; matching total
 counts alone cannot distinguish different blueprints. A valid host inventory can
 still fail to fit a peer's fragmented native grid.
+
+## 26. Snapshot maintenance is not a cursor transfer
+
+The cursor lifetime gate added in v0.1.30 exposed an unbalanced capture path.
+`unequipToLoose` and `correctWeaponSlot` detach through the hooked inventory
+remove, then place directly through `InventorySection::addItem`. The section
+add bypasses the inventory add hook, leaving a `PendingRemoval` even after
+placement and with every panel closed. Later publication or reconciliation can
+therefore remain deferred as if the player still held an item on the cursor.
+
+All top-level and nested snapshot reconciliation now runs under
+`g_invVetoSuspend`, restored with `__finally` even when a native call faults.
+Real player transfers retain their capture and pending-verdict protection.
+
+`inv_snapshot_cursor` exercises an actual native equipped-to-loose snapshot
+move on both game processes. Before the fix both reported one preserved item
+but `pending=1` and failed. After the fix both reported `pending=0` and passed,
+with the item's quality, craft level, manufacturer and material preserved.
+
+This gate covers snapshot maintenance, not every `InventoryGUI` exchange
+callback. Passing primitive transfer probes must not be reported as proof that
+mouse drag, right-click, portrait transfer and partial-stack exchange all work.

@@ -3104,7 +3104,76 @@ private:
     float position_[3];
 };
 
+// Reconciliation must not leave a native cursor reservation after a section-level move.
+class SnapshotCursorScenario : public Scenario {
+public:
+    SnapshotCursorScenario() : count_(0), tracked_(INV_ITEMS_MAX), moved_(false),
+        passed_(false) { memset(hand_, 0, sizeof(hand_)); }
+    virtual const char* name() const { return "inv_snapshot_cursor"; }
+    virtual void onStart(const ScenarioContext& ctx) {
+        EntityState squad[32];
+        unsigned int n = engine::captureSquad(ctx.gw, false, squad, 32);
+        for (unsigned int i = 0; i < n && tracked_ == INV_ITEMS_MAX; ++i) {
+            unsigned int h[5] = { squad[i].hType, squad[i].hContainer,
+                squad[i].hContainerSerial, squad[i].hIndex, squad[i].hSerial };
+            if (engine::inventoryOwnerClass(h) != 1) continue;
+            bool truncated = false;
+            count_ = engine::captureContainerContents(ctx.gw, h, before_,
+                INV_ITEMS_MAX, 0, &truncated);
+            if (truncated) continue;
+            for (unsigned int j = 0; j < count_; ++j) {
+                if (!before_[j].equipped || before_[j].quantity != 1 ||
+                    engine::isContainerItemType(before_[j].itemType)) continue;
+                tracked_ = j;
+                memcpy(hand_, h, sizeof(hand_));
+                break;
+            }
+        }
+    }
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!moved_ && ctx.elapsedMs >= 8000) {
+            moved_ = true;
+            if (tracked_ != INV_ITEMS_MAX) {
+                InvItemEntry desired[INV_ITEMS_MAX];
+                memcpy(desired, before_, count_ * sizeof(desired[0]));
+                desired[tracked_].equipped = 0;
+                desired[tracked_].section = 0;
+                bool changed = engine::applyContainerContents(ctx.gw, hand_, desired, count_);
+                InvItemEntry actual[INV_ITEMS_MAX];
+                bool truncated = false;
+                unsigned int n = engine::captureContainerContents(ctx.gw, hand_, actual,
+                    INV_ITEMS_MAX, 0, &truncated);
+                int copies = 0;
+                const InvItemEntry& expected = before_[tracked_];
+                for (unsigned int i = 0; i < n; ++i) {
+                    if (actual[i].itemType != expected.itemType ||
+                        strcmp(actual[i].stringID, expected.stringID) != 0 ||
+                        strcmp(actual[i].manufacturer, expected.manufacturer) != 0 ||
+                        strcmp(actual[i].material, expected.material) != 0) continue;
+                    if (!actual[i].equipped && actual[i].quality == expected.quality &&
+                        actual[i].level == expected.level) copies += actual[i].quantity;
+                }
+                bool pending = engine::itemTransferPending(hand_);
+                passed_ = changed && !truncated && copies == 1 && !pending;
+                char b[192];
+                _snprintf(b, sizeof(b) - 1,
+                    "SCENARIO SNAPCUR host=%d changed=%d copies=%d pending=%d sid='%s'",
+                    ctx.isHost ? 1 : 0, changed ? 1 : 0, copies, pending ? 1 : 0,
+                    expected.stringID);
+                b[sizeof(b) - 1] = 0; coop::logLine(b);
+            } else coop::logLine("SCENARIO SNAPCUR prerequisite=missing-worn-item");
+        }
+        return ctx.elapsedMs >= 16000;
+    }
+    virtual bool passed() const { return moved_ && passed_; }
+private:
+    unsigned int hand_[5], count_, tracked_;
+    InvItemEntry before_[INV_ITEMS_MAX];
+    bool moved_, passed_;
+};
+
 Scenario* makeInventoryScenario(const std::string& name) {
+    if (name == "inv_snapshot_cursor") return new SnapshotCursorScenario();
     if (name == "critical_stock") return new CriticalStockScenario();
     if (name == "critical_ground") return new CriticalGroundScenario();
     if (name == "critical_bag") return new CriticalBagScenario();

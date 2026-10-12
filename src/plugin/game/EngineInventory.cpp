@@ -755,7 +755,7 @@ static bool applyStockLayout(GameWorld* gw, Inventory* inv,
 // same logic can be pointed at a nested container's private inventory (a worn backpack's
 // 'backpack_content'), which is the only way a bagged item can be placed back INSIDE the bag
 // rather than merely somewhere on the character. Nothing in here needs the owner's hand.
-static bool applyToInventory(GameWorld* gw, Inventory* inv,
+static bool reconcileInventory(GameWorld* gw, Inventory* inv,
                              const InvItemEntry* items, unsigned int count,
                              bool truncated) {
     if (!gw || !inv) return false;
@@ -998,6 +998,20 @@ static bool applyToInventory(GameWorld* gw, Inventory* inv,
     // loot can change live on both screens instead of only after a reopen.
     if (changed && canRefreshGui) inventoryGuiRefresh(inv);
     return changed;
+}
+
+static bool applyToInventory(GameWorld* gw, Inventory* inv,
+                             const InvItemEntry* items, unsigned int count,
+                             bool truncated) {
+    // Snapshot moves are not cursor moves. Section-level adds bypass the
+    // inventory add hook, so their removals must never enter cursor capture.
+    const bool saved = g_invVetoSuspend;
+    g_invVetoSuspend = true;
+    __try {
+        return reconcileInventory(gw, inv, items, count, truncated);
+    } __finally {
+        g_invVetoSuspend = saved;
+    }
 }
 
 namespace {
