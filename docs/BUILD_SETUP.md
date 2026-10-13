@@ -83,10 +83,15 @@ the actual output for the source/configuration being released.
 The crawl-oracle fixtures format numeric log fields with invariant culture,
 matching the decimal-point native logs regardless of the Windows locale.
 
-## Deploy only to an explicitly chosen installation
+## Deployment side effects
 
-These commands mutate the selected game installation; they are not verification
-commands. Keep the game closed and use a disposable test installation for Harness:
+These commands are not verification commands. `deploy.cmd` mutates the selected
+installation **and also `%USERPROFILE%\Kenshi-Join` if that install exists**,
+including in UI-only mode. Keep both games closed; do not use this helper for
+an isolated deployment or a read-only audit. For a single intended installation,
+manually copy the four-file kit described below, preserving `coop_config.json`.
+Secondary mod/loader copy failures are not reliably propagated by this helper;
+verify every copied file rather than treating exit code 0 as complete deployment.
 
 ```bat
 scripts\deploy.cmd "D:\SteamLibrary\steamapps\common\Kenshi" Harness
@@ -134,6 +139,10 @@ three-asset `gh` commands with an explicit repository, an existing source tag
 manifest summary. `-Owner` and `-Repo` override independently; omitted values
 come from the existing manifest. `-WhatIf` performs these checks and previews
 the manifest and commands without writing the manifest or publishing anything.
+Keep the canonical input basenames `KenshiCoop.dll`, `KenshiCoopUI.dll` and
+`KenshiCoop-kit.zip`, even when selecting files from custom directories. The
+printed upload commands do not rename assets, while the feed and installation
+instructions use those canonical names.
 
 Never run the publisher without `-WhatIf` during an audit: its normal mode writes
 the stable manifest. A real release must upload and verify all assets first,
