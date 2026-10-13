@@ -25,7 +25,7 @@
 #     ids from RELEASE BODIES (they work in README.md, not here), so "#english"
 #     renders as a link that goes nowhere - verified on the v0.1.0 page.
 #     <details> is the only toggle that actually works in a release body.
-#   * Do not repeat the fork attribution or the protocol number in every
+#   * Do not repeat the original-project attribution or the protocol number in every
 #     release; that belongs in README.md. Mention the protocol only when it
 #     CHANGES, since that is the release where it decides who can still connect.
 #   * Do not repeat the release title as a heading inside its body.
@@ -49,6 +49,8 @@ param(
     [string]$UiDll  = "src\ui\x64\Release\KenshiCoopUI.dll",
     [string]$Mod    = "dist\mods\KenshiCoop\KenshiCoop.mod",
     [string]$Json   = "dist\mods\KenshiCoop\RE_Kenshi.json",
+    [string]$Kit    = "dist\KenshiCoop-kit.zip",
+    [string]$ReleaseNotes = "dist\RELEASE_NOTES.md",
     [string]$Out    = "dist\UPDATE.txt",
     [string]$Notes  = "",
     [switch]$Amend,
@@ -98,8 +100,9 @@ $uiSha = (Get-FileHash $UiDll -Algorithm SHA256).Hash.ToLower()
 if (-not $Owner -or -not $Repo) {
     if (Test-Path $Out) {
         $prev = Get-Content $Out -Raw
-        if (-not $Owner -and $prev -match '(?m)^\s*url\s*=\s*https://github\.com/([^/]+)/([^/]+)/') {
-            $Owner = $Matches[1]; $Repo = $Matches[2]
+        if ($prev -match '(?m)^\s*url\s*=\s*https://github\.com/([^/]+)/([^/]+)/') {
+            if (-not $Owner) { $Owner = $Matches[1] }
+            if (-not $Repo) { $Repo = $Matches[2] }
         }
     }
 }
@@ -110,6 +113,29 @@ if (-not $Owner -or -not $Repo) {
 $tag = "v$version"
 $url = "https://github.com/$Owner/$Repo/releases/download/$tag/KenshiCoop.dll"
 $uiUrl = "https://github.com/$Owner/$Repo/releases/download/$tag/KenshiCoopUI.dll"
+
+if (-not (Test-Path $Kit)) { throw "No kit at $Kit - run scripts\make_mod_kit.ps1 -Configuration Release first" }
+if (-not (Test-Path $ReleaseNotes)) { throw "No release notes at $ReleaseNotes" }
+
+# A publication command must not pair selected runtime files with an older ZIP.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $Kit).Path)
+try {
+    $required = @("KenshiCoop/KenshiCoop.dll", "KenshiCoop/KenshiCoopUI.dll",
+                  "KenshiCoop/KenshiCoop.mod", "KenshiCoop/RE_Kenshi.json")
+    if ($archive.Entries.Count -ne 4 -or
+        (Compare-Object $required @($archive.Entries | ForEach-Object { $_.FullName }))) {
+        throw "$Kit must contain exactly the four KenshiCoop runtime files"
+    }
+    foreach ($pair in @(@("KenshiCoop.dll", $sha), @("KenshiCoopUI.dll", $uiSha),
+                       @("KenshiCoop.mod", (Get-FileHash $Mod -Algorithm SHA256).Hash.ToLower()),
+                       @("RE_Kenshi.json", (Get-FileHash $Json -Algorithm SHA256).Hash.ToLower()))) {
+        $stream = $archive.GetEntry("KenshiCoop/$($pair[0])").Open()
+        try { $kitHash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.ToLower() }
+        finally { $stream.Dispose() }
+        if ($kitHash -ne $pair[1]) { throw "$Kit contains a stale $($pair[0]); rebuild the kit" }
+    }
+} finally { $archive.Dispose() }
 
 $manifest = @"
 # KenshiCoop update manifest - read by the in-DLL updater over HTTPS.
@@ -138,23 +164,24 @@ Write-Host "  sources   https://github.com/$Owner/$Repo/tree/$tag"
 Write-Host "            (release tag; do not upload a separate source ZIP)"
 Write-Host ""
 
-if ($WhatIf) { Write-Host "-WhatIf: not writing $Out"; Write-Host $manifest; exit 0 }
-
-New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
-# Parenthesised: without them PowerShell binds -replace's operands as extra
-# WriteAllText arguments and the overload resolution fails. LF endings so the
-# manifest reads identically however git normalises it on the way out.
-$manifestLf = ($manifest -replace "`r`n", "`n")
-[IO.File]::WriteAllText((Join-Path $root $Out), $manifestLf)
-Write-Host "wrote $Out"
+if ($WhatIf) {
+    Write-Host "-WhatIf: not writing $Out"
+    Write-Host $manifest
+} else {
+    New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
+    # LF endings keep the updater manifest independent of Git's newline conversion.
+    $manifestLf = ($manifest -replace "`r`n", "`n")
+    [IO.File]::WriteAllText((Join-Path $root $Out), $manifestLf)
+    Write-Host "wrote $Out"
+}
 Write-Host ""
 Write-Host "Next, in order (the manifest must not go live before the asset it names):"
 if ($Amend) {
     Write-Host "  AMEND $tag (same version, replace assets):"
-    Write-Host "  1. gh release upload $tag `"$Dll`" `"$UiDll`" `"$Mod`" `"$Json`" --clobber"
+    Write-Host "  1. gh release upload $tag `"$Kit`" `"$Dll`" `"$UiDll`" --repo `"$Owner/$Repo`" --clobber"
     Write-Host "  2. git add $Out && git commit -m `"amend $tag`" && git push"
 } else {
-    Write-Host "  1. gh release create $tag `"$Dll`" `"$UiDll`" `"$Mod`" `"$Json`" --title `"$tag`" --notes `"$Notes`""
+    Write-Host "  1. gh release create $tag `"$Kit`" `"$Dll`" `"$UiDll`" --repo `"$Owner/$Repo`" --verify-tag --title `"$tag`" --notes-file `"$ReleaseNotes`""
     Write-Host "  2. git add $Out && git commit -m `"release $tag`" && git push"
 }
 Write-Host ""

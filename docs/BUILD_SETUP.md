@@ -4,7 +4,8 @@
 
 - Windows x64; VC++ 2010 x64 compiler (v100), Windows SDK 7.1 and KB2519277.
 - VS2022 Build Tools for MSBuild; `vswhere` resolves its path.
-- Vendored `third_party/KenshiLib_deps`, Boost and the C89-patched ENet.
+- External KenshiLib/Boost dependencies restored below, plus pinned, patched ENet;
+  these dependency sources are not included in a fresh project checkout.
 - `KENSHILIB_DIR` pointing to `third_party\KenshiLib_deps\KenshiLib` and
   `BOOST_INCLUDE_PATH` pointing to `third_party\KenshiLib_deps\boost_1_60_0`.
 
@@ -12,6 +13,15 @@
 from an installed SDK. Build commands fail if either DLL fails.
 
 ## Restore external dependencies
+
+Clone the public source repository, then check out the exact existing release
+tag whose binaries you intend to reproduce (replace `<source-tag>`):
+
+```bat
+git clone https://github.com/kotetsyy/KenshiCoop4up.git
+cd KenshiCoop4up
+git checkout <source-tag>
+```
 
 From a fresh checkout of the release tag, restore the dependency revisions used
 for public builds. Git LFS is required for KenshiLib libraries and the Boost archive:
@@ -28,23 +38,21 @@ git apply third_party/enet/patches/0001-enet-c89-for-loops.patch
 git apply third_party/enet/patches/0002-enet-socket-hooks.patch
 ```
 
-Update the pinned revisions when a release changes its dependencies. Vendored
-libraries remain outside the mod ZIP; the patches and v100 compatibility
-headers are tracked in the project repository.
+Keep these revisions pinned when reproducing an existing release. A future
+dependency change requires an explicit source/release update, not a checkout
+of dependency `latest`. External libraries remain outside the mod ZIP; the
+patches and v100 compatibility headers are tracked in this repository.
 
 `kenshilib-v100.patch` records the existing v100 header compatibility fixes:
 a shared enum guard and a complete `CraftingItem` placeholder for a by-value
 container declaration. The placeholder is not a recovered native ABI layout;
 do not construct native crafting objects or access their item containers with it.
 
-## Build and deploy
+## Build without touching the game
 
 ```bat
 scripts\build_plugin.cmd Release
 scripts\build_plugin.cmd Harness
-scripts\build_ui.cmd Harness
-scripts\deploy.cmd "D:\SteamLibrary\steamapps\common\Kenshi" Harness
-scripts\deploy.cmd "D:\SteamLibrary\steamapps\common\Kenshi" Harness ui
 ```
 
 `build_plugin.cmd` builds both `src\plugin\x64\<Config>\KenshiCoop.dll` and
@@ -57,38 +65,104 @@ configuration: it modifies engine-owned strings. Cross-DLL communication uses
 only the packed, versioned POD C ABI in `src\ui\CoopUiApi.h`. RE_Kenshi loads
 only the core; the core loads and pins the UI beside itself. No hot reload.
 
+VS2022 supplies MSBuild orchestration, not a replacement C++ ABI. The compiler,
+SDK and `/MD` runtime must remain v100 / SDK 7.1 / KB2519277 as above; an ordinary
+modern-compiler hosted build is not an ABI-compatible substitute. This repository
+has no root GitHub Actions workflows: builds and publication are manual and
+controlled on a suitably provisioned Windows machine.
+
+Game-independent verification (builds/runs local test artifacts, does not install
+into or launch Kenshi):
+
+```powershell
+pwsh -NoProfile -File scripts/verify.ps1
+```
+
+No historical test count is evidence that the current checkout passes. Record
+the actual output for the source/configuration being released.
+The crawl-oracle fixtures format numeric log fields with invariant culture,
+matching the decimal-point native logs regardless of the Windows locale.
+
+## Deploy only to an explicitly chosen installation
+
+These commands mutate the selected game installation; they are not verification
+commands. Keep the game closed and use a disposable test installation for Harness:
+
+```bat
+scripts\deploy.cmd "D:\SteamLibrary\steamapps\common\Kenshi" Harness
+scripts\deploy.cmd "D:\SteamLibrary\steamapps\common\Kenshi" Harness ui
+```
+
 ## Distribution and updates
 
-`scripts\make_mod_kit.ps1 -SkipBuild` packages the Release pair into
-`dist\KenshiCoop-kit.zip`, containing only the four runtime files under
+Package the matching Release pair from the repository root:
+
+```powershell
+pwsh -NoProfile -File scripts/make_mod_kit.ps1 -Configuration Release -SkipBuild
+```
+
+This creates `dist/KenshiCoop-kit.zip` with exactly four runtime files under
 `KenshiCoop/`: core DLL, UI DLL, mod and RE_Kenshi JSON. Packaged hashes are
-verified against the build outputs, but no `PROVENANCE.json` is shipped.
-Use `-Configuration Harness -SkipBuild` for `dist\KenshiCoop-dev-kit.zip`.
-F2 creates `coop_config.json` when saving settings; updates do not replace it.
-Instructions live in the release body. Do not upload `KenshiCoop-source.zip`
-or any other dedicated source archive as a release asset: link the exact
-release tag in the public repository instead. GitHub's automatic source
-downloads are sufficient for the tracked project files; restore the external
-dependencies below to build them. Keep tags tied to the source used for their
-DLLs. Source availability required by AGPL is retained without adding another
-player-facing download.
-On this workstation, use `pwsh -NoProfile -File scripts/make_mod_kit.ps1 -SkipBuild`;
-the legacy `powershell` invocation did not resolve `Get-FileHash`.
+checked against build outputs; no `PROVENANCE.json` is shipped. `-SkipBuild`
+requires the matching pair to have been built already. F2 creates
+`coop_config.json` when saving settings; updates must preserve it.
 
-Publish both DLL assets together. `scripts\publish_release.ps1` emits the core
-`sha256`/`url` plus the companion `uiSha256`/`uiUrl` in the update manifest.
-An incomplete manifest is rejected; both payloads are verified before replacing
-the installed pair. Changes take effect after restarting the game.
+### Manual future publication
 
-An older core-only updater needs the new companion too: manually install both
-DLLs, or let the new core repair the missing UI on its next update check and
-restart again. UI absence/ABI rejection is logged; it does not stop networking.
+Use an exact existing source tag at the commit used to build the DLLs, not an
+automatically created tag at whatever branch tip happens to be current. Replace
+`<source-tag>` below with that tag, and check its source and build version agree.
+Publish three assets: the four-file ZIP and the standalone core/UI DLL pair.
+Release installation instructions belong in the notes file:
 
-The current public Release pair uses protocol 70; the current Harness pair uses
-private protocol 71. Both share the load-specific READY barrier and a 1 ms
-maximum idle ENet wait; only the private pair mirrors the client's local log.
+```powershell
+gh release create <source-tag> dist/KenshiCoop-kit.zip src/plugin/x64/Release/KenshiCoop.dll src/ui/x64/Release/KenshiCoopUI.dll --repo kotetsyy/KenshiCoop4up --verify-tag --title <source-tag> --notes-file dist/RELEASE_NOTES.md
+```
+
+The command above publishes remotely: do not run it during a documentation audit.
+For local publisher inspection only:
+
+```powershell
+pwsh -NoProfile -File scripts/publish_release.ps1 -Owner kotetsyy -Repo KenshiCoop4up -WhatIf
+```
+
+The helper checks that the ZIP has exactly those four runtime files and that
+all four packaged hashes match the selected DLL, mod and loader JSON inputs.
+It prints, but never executes, the
+three-asset `gh` commands with an explicit repository, an existing source tag
+(`--verify-tag`) and `-ReleaseNotes` / `--notes-file`. `-Notes` is only the short
+manifest summary. `-Owner` and `-Repo` override independently; omitted values
+come from the existing manifest. `-WhatIf` performs these checks and previews
+the manifest and commands without writing the manifest or publishing anything.
+
+Never run the publisher without `-WhatIf` during an audit: its normal mode writes
+the stable manifest. A real release must upload and verify all assets first,
+then publish the stable manifest referencing the available core/UI URLs and
+hashes. Both payloads are verified before replacing the installed pair; restart
+the game to use them. Manual installation must replace both DLLs together.
+
+### Source and dependency obligations
+
+Link the exact public source tag in the release body; GitHub's automatic source
+downloads contain the tracked project files, not the external dependencies.
+The pinned fetch instructions above, ordered patches and compatibility headers
+are part of reproducing the build. Do not add a separate player-facing source
+archive as a release asset. Preserve nhoral's original authorship and
+https://github.com/nhoral/KenshiCoop credit; kotetsyy maintains this derivative.
+
+Preserve the project's AGPL-3.0 and all applicable GPL/dependency notices,
+including ENet's MIT notice and the notices accompanying KenshiLib, Boost and
+other linked dependencies. Before distribution, ensure corresponding source and
+required notices for the actual distributed components remain available under
+their respective licenses; do not assume a precompiled dependency bundle or
+the project's automatic source ZIP alone satisfies every obligation.
+
+The current public Release pair uses protocol 70; the Harness pair uses
+`NET_DIAG` protocol 71. Both share the load-specific READY barrier and a 1 ms
+maximum idle ENet wait; only the diagnostic pair mirrors the client's local log.
+Harness forcibly disables the public updater; distribute it as a manual kit.
 The packed `TimePacket` is 21 bytes in both configurations (`readyLoadId` is
-always present). Earlier public 59/64/66/68 and private 63/65/67/69 pairs are rejected at handshake.
+always present). Earlier public 59/64/66/68 and diagnostic 63/65/67/69 pairs are rejected at handshake.
 `InvItemEntry` is 165 bytes: stock snapshots also carry the native loose section
 and two grid coordinates. Complete building stock restores the host's physical
 stacks at those positions instead of attempting a different greedy packing.
@@ -96,38 +170,26 @@ stacks at those positions instead of attempting a different greedy packing.
 and the actual host platoon template SID. Native `isATrader` reads that
 template's `is trader` flag; the character SID and squad role alone are insufficient.
 
-v0.1.25 targets 100 Hz entity snapshots with a 10 ms send interval on the existing
+Historical v0.1.25 behavior: it targets 100 Hz entity snapshots with a 10 ms send interval on the existing
 monotonic QPC clock, not the coarse `GetTickCount` clock. The sender retains its
 snapshot buffer capacity between sends and preserves capture-time wire stamps.
 Fresh captures remain game-frame-paced; interpolation adapts to those stamps
 and ignores duplicate captures. The 50 ms distant-NPC slice selection and other
-channel budgets are unchanged. Public 64/private 65 packet formats do not change.
+channel budgets are unchanged. Its public 64/diagnostic 65 packet formats did not change.
 
-The private launcher reads `dist/debug-kit/private-update.json` and synchronizes
-against the latest closed GitHub release before starting Kenshi. The current
-manual Harness pair is not published to that feed: starting its old launcher
-would restore the previous remote pair. Public publication is separate.
+### Manual Harness kit installation
 
-### Manual installation of v0.1.27
+```powershell
+pwsh -NoProfile -File scripts/make_mod_kit.ps1 -Configuration Harness -SkipBuild
+```
 
-`dist/KenshiCoop-dev-kit.zip` is a four-file manual update for existing private
-installs, identical on HOST and JOIN. With both games closed, copy
-`KenshiCoop/` into `<Kenshi>/mods/`, replacing the two DLLs, mod and RE_Kenshi
-JSON while leaving `coop_config.json` intact. Launch through Steam or
-`kenshi_x64.exe`, not the private launcher: the manual connection hotfix has
-not been published to its update feed, so it would restore the previous release.
+After building the matching Harness core/UI pair, this creates the four-file
+`dist/KenshiCoop-dev-kit.zip`. With both games closed, install the same kit on
+HOST and JOIN by copying `KenshiCoop/` into `<Kenshi>/mods/`, replacing the two
+DLLs, mod and RE_Kenshi JSON while leaving `coop_config.json` intact. Launch
+through Steam or `kenshi_x64.exe`; no separate launcher or private update feed
+is required or provided by this public source process.
 
-Save filesystem operations use Unicode Windows APIs while engine/wire paths
-remain UTF-8. An unsuccessful host save or refused bootstrap transfer ends
-the session instead of issuing an unreadable `LOAD_GO` or holding the host
-for a READY that cannot arrive. The load/READY pause is now shared by Release
-and Harness: READY is sent after the new world becomes live and must match the
-host's current `LOAD_GO` id for each connected join. The temporary hold preserves
-the selected speed/pause vote and requires save, load, speed and time sync.
-Release/Harness core/UI builds succeeded; protocol checks passed 565/565 and
-contract fixtures 29/29. All 11 paired native game regressions passed in disposable
-installations on nonprimary DISPLAY1, never in the user's primary installation.
-The launcher may exit after starting a new native game process; the batch run
-waits on the actual game PIDs, not the bootstrap process.
-The named-shop oracle compares complete native trade quantities and content
-fingerprints on both peers; a nonempty but different shop still fails.
+This remains experimental two-player co-op. Three/four-player sessions are not
+validated; see the README's known issues and report-bugs directions rather than
+treating a build or a historical regression report as game-level validation.

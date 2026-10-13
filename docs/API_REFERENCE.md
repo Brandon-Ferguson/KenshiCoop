@@ -1,25 +1,24 @@
 # RE_Kenshi / KenshiLib API Reference
 
-> **Purpose.** A dense, model-facing technical reference for everything this
-> project can use to *control Kenshi*. It documents (a) the RE_Kenshi / KenshiLib
-> plugin framework (loading, hooking, address resolution), (b) the reverse-engineered
-> Kenshi engine control surface (the game classes, functions, arguments and return
-> values you can call), and (c) this repo's own facade layers built on top
-> (`ScenarioApi`, `Scenario`, `Protocol`, `NetClient`, `MainThreadQueue`, `CoopLog`).
+> **Purpose.** A dense, model-facing technical reference for the documented
+> interfaces KenshiCoop4up can use to *control Kenshi*. It covers (a) the
+> RE_Kenshi / KenshiLib plugin framework (loading, hooking, address resolution),
+> (b) the reverse-engineered Kenshi engine control surface, and (c) this repo's
+> live layers: `game/Engine`, transport `net/NetLink`, the main-thread bridge
+> `core/Inbound`, `netproto/Wire.h`, the Harness-only scenario runner in
+> `src/plugin/test/Scenario.h`, `CoopLog`, and the native UI companion C ABI.
 >
-> It is a *directory of functions*, not a tutorial. Each entry lists purpose,
-> arguments and return value. Signatures are taken verbatim from the KenshiLib
-> headers under `third_party/KenshiLib_deps/KenshiLib/Include/` and from this
-> repo's `src/`.
+> It is a *directory of functions*, not a tutorial. Engine SDK signatures come
+> from `third_party/KenshiLib_deps/KenshiLib/Include/`; project interfaces come
+> from the linked, checked-in sources below. This checked-in reference is the
+> authoritative public documentation for the interfaces it documents; source
+> wins if a declaration or lifecycle description conflicts with it.
 >
-> **Legacy note (Phase 1).** The original transport/facade stack — `NetClient`,
-> `MainThreadQueue`, `ScenarioApi`, and `netproto/Protocol.h` — was **removed**.
-> Sections that describe that stack are kept for historical context only. The
-> live equivalents are: transport `net/NetLink`, the main-thread bridge
-> `core/Inbound`, the wire protocol `netproto/Wire.h` (history in
-> `resources/PROTOCOL_HISTORY.md`), and the scenario runner in
-> `src/plugin/test/` (Harness build only). Canonical copy:
-> [`resources/resources.md`](../resources/resources.md).
+> KenshiCoop4up is independently maintained by kotetsyy, based on
+> [KenshiCoop by nhoral](https://github.com/nhoral/KenshiCoop), not an assertion
+> of original authorship. The mod remains experimental, with a two-player
+> validation focus; the four-slot wire/UI capacity does not establish that
+> three- or four-player gameplay has been validated.
 
 ---
 
@@ -52,11 +51,11 @@
    - [`Faction`](#513-faction)
 6. [Key enums](#6-key-enums)
 7. [Proven engine-call recipes (this repo)](#7-proven-engine-call-recipes-this-repo)
-8. [Project facade: `ScenarioApi`](#8-project-facade-scenarioapi)
-9. [Project facade: `Scenario`](#9-project-facade-scenario)
-10. [Wire protocol (`netproto/Protocol.h`)](#10-wire-protocol-netprotoprotocolh)
-11. [`NetClient`](#11-netclient)
-12. [`MainThreadQueue`](#12-mainthreadqueue)
+8. [Project engine facade](#8-project-engine-facade)
+9. [Harness scenario interface](#9-harness-scenario-interface)
+10. [Wire protocol (`netproto/Wire.h`)](#10-wire-protocol-netprotowireh)
+11. [`NetLink`](#11-netlink)
+12. [`Inbound`](#12-inbound)
 13. [`CoopLog`](#13-cooplog)
 14. [Runtime configuration (environment variables)](#14-runtime-configuration-environment-variables)
 15. [Ogre / MyGUI / OIS — the underlying engine layer](#15-ogre--mygui--ois--the-underlying-engine-layer)
@@ -117,7 +116,7 @@ These constraints apply to *every* engine call and are the difference between
 - **Main thread only.** Kenshi's engine (ancient Ogre 2.0 "Tindalos") is
   single-threaded and not thread-safe. All game mutation must happen inside the
   main-loop hook. Cross-thread data (e.g. from the net thread) must be marshalled
-  through a queue (`MainThreadQueue`) and applied on the main thread.
+  through [`core/Inbound`](../src/plugin/core/Inbound.h) and applied on the main thread.
 - **Wrap every engine call in SEH** (`__try/__except`). These functions run
   deep, version-specific engine code; a defensive guard turns a bad call into a
   recoverable failure instead of a process crash. SEH frames must contain **no
@@ -651,116 +650,161 @@ called only on the main thread inside `__try/__except`.
 
 ---
 
-## 8. Project facade: `ScenarioApi`
+## 8. Project engine facade
 
-`src/plugin/ScenarioApi.h` — namespace `coop`. The thin, crash-safe action facade
-scenarios use to touch the game. Every function null-checks and returns a failure
-value rather than throwing; all positions are **Ogre world coordinates**;
-everything runs main-thread + SEH-guarded.
+The current guarded engine surface is namespace `coop::engine` in
+[`src/plugin/game/Engine.h`](../src/plugin/game/Engine.h), not the removed
+`ScenarioApi`. Use the declarations and per-call failure contracts there:
 
-- `void scenarioLog(const char* msg)` — Emit one preformatted log line through `coopLog` (lands in both the coop log and `kenshi.log`).
-- `int remotePlayerCount()` — Number of remote players currently tracked (>0 means a peer is in-game and sending; use as a connection handshake).
-- `Character* localPlayer(GameWorld* gw)` — The first player character, or 0.
-- `Faction* playerFaction(GameWorld* gw)` — The player's faction, or 0.
-- `RootObjectContainer* playerSquadContainer(GameWorld* gw)` — The active squad container, or 0.
-- `GameData* playerTemplate(GameWorld* gw)` — The player's own `GameData` template, or 0.
-- `GameData* lookupTemplate(GameWorld* gw, const char* stringId)` — Look up a template by string id; falls back to the player's template if not found.
-- `int playerSquadSize(GameWorld* gw)` — Squad member count, or -1 on fault.
-- `Character* spawnIntoPlayerSquad(GameWorld* gw, GameData* tmpl, const Ogre::Vector3& pos)` — Spawn a character from `tmpl` (or the player's template if `tmpl==0`) at `pos` and enlist it into the player squad. Return: the new `Character*` or 0.
-- `bool getCharPos(Character* c, Ogre::Vector3* out)` — Read a character's live position. Return: false on fault.
-- `bool getCharHand(Character* c, u32 out[5])` — Read a character's save-stable hand as `{index, serial, type, container, containerSerial}`. Return: false on fault.
-- `bool teleportChar(Character* c, const Ogre::Vector3& pos, float headingRad)` — Snap to an exact transform and stop (halt + teleport). Return: false on fault.
-- `bool moveCharTo(Character* c, const Ogre::Vector3& dest)` — Order a walk to an absolute destination (engine locomotion). Return: false on fault.
-- `void clearCharGoals(Character* c)` — Clear autonomous AI goals (best-effort).
-- `void despawnChar(GameWorld* gw, Character* c)` — Remove a spawned character (best-effort). The pointer is dead afterward.
+- `void resolve()` — Resolve engine function addresses once at plugin load.
+- `bool gameplayLive(GameWorld* gw)` — Guarded local-gameplay readiness probe.
+- `bool loadSave(const std::string& name)` — Request a deferred save load;
+  returns false if the save subsystem is not ready or the call faults.
+- `unsigned int captureSquad(GameWorld* gw, bool leaderOnly, EntityState* out, unsigned int maxOut)` — Capture up to `maxOut` squad entities; return the number written.
 
-## 9. Project facade: `Scenario`
+Deterministic scene setup/re-arm helpers are in
+[`game/EngineScenario.h`](../src/plugin/game/EngineScenario.h); remaining
+scenario-related operations are also declared in `Engine.h`. Scenario domain
+files share logging and factory helpers through
+[`test/ScenarioSupport.h`](../src/plugin/test/ScenarioSupport.h).
+Engine calls remain main-thread-only and SEH-guarded; these facades do not make
+engine pointers safe to retain across loads or usable from the network thread.
 
-`src/plugin/Scenario.h` — namespace `coop`. A scenario is a deterministic,
-time-gated state machine run after the auto-loaded save reaches gameplay. Both
-clients run the same object (host drives, join observes); the test runner compares
-logs.
+## 9. Harness scenario interface
 
-- `struct ScenarioContext { GameWorld* gw; bool isHost; u32 localId; DWORD elapsedMs; unsigned tick; }` — per-frame context passed to a scenario (`gw` is never null while running; `elapsedMs` is wall-clock since `onStart`; `isHost` selects authoritative vs observer behavior).
-- `class Scenario` (abstract):
-  - `virtual const char* name() const = 0` — stable id (must match `KENSHICOOP_SCENARIO`).
-  - `virtual void onStart(const ScenarioContext& ctx) = 0` — called once on the first in-game frame.
-  - `virtual bool onTick(const ScenarioContext& ctx) = 0` — called each frame; return `true` when complete (harness logs `SCENARIO RESULT` and exits).
-  - `virtual bool passed() const = 0` — final in-plugin verdict (queried once after `onTick` returns true).
-- `Scenario* makeScenario(const std::string& name)` — Registry factory; construct a scenario by name or return 0 if unknown. Caller owns the result (freed at process exit). Registered scenarios: `squad_spawn_sync`, `squad_move_sync`.
+[`src/plugin/test/Scenario.h`](../src/plugin/test/Scenario.h) — namespace `coop`.
+Scenarios are deterministic, time-gated state machines compiled into the
+**Harness** build, not the public Release. Both clients select the same scenario
+and branch on `ctx.isHost`; log oracles compare their observations.
 
-Scenarios touch the game **only** through the `ScenarioApi` facade (never the
-engine directly) so all mutation stays SEH-guarded on the main thread.
+`ScenarioContext` contains:
 
-## 10. Wire protocol (`netproto/Protocol.h`)
+- `GameWorld* gw`, `bool isHost`, `u32 localId` — Live world, role and assigned network player id.
+- `unsigned long elapsedMs` — Before arming, milliseconds since local gameplay
+  start; after arming, milliseconds since `onStart`.
+- `unsigned int tick` — Scenario tick counter, incremented for each armed `onTick`.
+- `bool peerReady` — An owned-entity batch has been received from a peer in the
+  current world. On the host this gates actions that the loaded join must
+  witness; HostOnly runs need the arming-timeout fallback.
+- `bool (*pickMintedProxy)(const unsigned int refHand[5], unsigned int outLocal[5], unsigned int outCanon[5], float* outDist)` — Optional replicator adapter for
+  the minted proxy nearest a reference body. Check the pointer and return value;
+  the local hand is for local orders, the canonical hand identifies its stream.
 
-> **Note:** this section documents the original milestone protocol. The **live
-> protocol is `src/netproto/Wire.h`** (public `PROTOCOL_VERSION = 70`, private
-> diagnostic protocol `71`, checked during handshake), with the same conventions
-> (plain C++03, little-endian,
-> packed structs, `packetType`/`readPacket` helpers) with the full packet set:
-> inventory/equipment sync, cross-owner transfer intents (`PKT_INV_XFER`),
-> world items (bidirectional), medical/stats/stealth, buildings and production,
-> money/faction/time/speed, coordinated save/load streaming, and NPC census.
-> `Wire.h` is heavily commented per-packet and is the source of truth;
-> `src/prototest/main.cpp` asserts every struct size and round-trip.
->
-> Inventory transfers carry complete bag children (or an explicit empty bag),
-> and successful ACKs carry the contents actually captured from the source.
-> ACK quantities never include a fabricated source shortfall. Spawn descriptions
-> additionally carry a merchant's five-field `shopHome` handle so a peer can
-> bind the native shop's furniture inventory, not merely copy NPC pockets.
+`class Scenario` has a virtual destructor and these callbacks:
 
-namespace `coop`. Plain C++03, little-endian, packed structs sent as raw bytes.
-`PROTOCOL_VERSION = 5` (checked during handshake).
+- `virtual const char* name() const = 0` — Stable scenario id.
+- `virtual void onGameplay(const ScenarioContext&) {}` — Optional pre-arm
+  callback on every gameplay tick up to and including the arming tick. Pin/hold
+  baked subjects here while waiting for the peer.
+- `virtual void onStart(const ScenarioContext& ctx) = 0` — Called once, **before
+  the engine tick**, when a peer's first owned-entity batch arrives or the
+  configured arming timeout expires (zero arms immediately). `elapsedMs` is zero.
+- `virtual bool onTick(const ScenarioContext& ctx) = 0` — Called **after
+  replication apply** while armed. Return true to finish; the caller reads
+  `passed()`, logs `SCENARIO RESULT PASS|FAIL`, then begins the capture hold.
+  Completion does not itself exit the process.
+- `virtual bool passed() const = 0` — Final in-plugin verdict.
 
-**Types:** `u8`, `u16`, `u32`, `f32`.
+The lifecycle is implemented in
+[`Plugin.cpp`](../src/plugin/Plugin.cpp) (`tickScenarioStart` / `tickScenarioTick`).
+`Scenario* makeScenario(const std::string& name)` returns an allocated scenario,
+or zero for an unknown name. The registry in
+[`test/Scenario.cpp`](../src/plugin/test/Scenario.cpp) chains the probe, movement,
+NPC, combat, medical, inventory, world-item, character-state, building and
+session domain factories. Each domain's maker contains its current names:
+for example, `leader_move` in
+[`ScenarioMovement.cpp`](../src/plugin/test/ScenarioMovement.cpp) and
+`inv_regear` / `inv_nested_bag` in
+[`ScenarioInventory.cpp`](../src/plugin/test/ScenarioInventory.cpp).
+Use that registry rather than a historical two-scenario list.
 
-**`enum PacketType`** (first byte of every packet): `PKT_HELLO=1`, `PKT_WELCOME=2`,
-`PKT_PLAYER_STATE=3`, `PKT_PING=4`, `PKT_PONG=5`, `PKT_PLAYER_LEFT=6`,
-`PKT_NPC_STATE=7`, `PKT_SQUAD_STATE=8`. Sentinel `PLAYER_ID_ALL = 0xFFFFFFFF`.
+## 10. Wire protocol (`netproto/Wire.h`)
 
-**Packets:**
-- `HelloPacket { u8 type; u16 version; u8 nameLen; /* name[nameLen] */ }` — client→host on connect.
-- `WelcomePacket { u8 type; u32 playerId }` — host→client; assigns a player id.
-- `PlayerStatePacket { u8 type; u32 playerId; u32 tick; f32 x,y,z; f32 heading }` — a player's transform for a tick (presence heartbeat).
-- `PingPacket { u8 type; u32 nonce }` — liveness / RTT (`PKT_PING`/`PKT_PONG`).
-- `NpcStateEntry` (75 bytes) — one replicated entity: 5-field `hand` (`htype, hcontainer, hcontainerSerial, hindex, hserial`), transform (`x,y,z,heading`), current `task` (`u16`, `NPC_TASK_NONE=0xFFFF` if none) + 5-field subject hand (`stype, scontainer, scontainerSerial, sindex, sserial`), and locomotion state (`cspeed, cmotionX/Y/Z, cmoving`).
-- `NpcBatchHeader { u8 type; u8 count }` — NPC batch: `[header][NpcStateEntry*count]`. `NPC_BATCH_MAX = 18` per datagram.
-- `SquadBatchHeader { u8 type; u32 ownerId; u8 count }` — owner-tagged squad batch (bidirectional; each peer streams its own squad).
+[`src/netproto/Wire.h`](../src/netproto/Wire.h) — namespace `coop`. Plain C++03,
+little-endian, one-byte-packed structs sent as raw bytes. The handshake checks
+`PROTOCOL_VERSION`: public Release uses **70**; Harness with
+`KENSHICOOP_NET_DIAG` uses **71** and adds bounded reliable join-log chunks.
+Mismatched protocols are rejected; the build/release version is a separate axis.
 
-**Helpers:**
-- `u8 packetType(const void* data, unsigned len)` — first byte (type tag), or 0 if empty.
-- `template<typename T> bool readPacket(const void* data, unsigned len, T* out)` — typed read; returns true and fills `out` if the buffer is large enough.
+The live packet set covers owner-tagged entity batches and transition events,
+inventory/equipment snapshots, cross-owner transfer intents and verdicts,
+bidirectional world items, medical/stats/stealth state, buildings/production,
+money/faction/time/speed, coordinated save/load streaming, NPC census and player
+rosters. `Wire.h` defines the current tags, fixed headers, trailing payloads,
+limits and per-packet authority contracts; the removed protocol-5 packet list
+is not a compatible interface.
 
-## 11. `NetClient`
+Inventory transfers carry complete bag children (or an explicit empty bag),
+and successful ACKs carry the contents actually captured from the source.
+ACK quantities never include a fabricated source shortfall. Spawn descriptions
+also carry a merchant's five-field `shopHome` handle for binding the native
+shop's furniture inventory, not merely copying NPC pockets.
 
-`src/plugin/NetClient.h` — namespace `coop`. Owns ENet on a dedicated background
-thread. The net thread exclusively owns the `ENetHost`; inbound data is handed to
-the main thread via `MainThreadQueue`; the main thread publishes outbound state.
+- `u8 packetType(const void* data, unsigned int len)` — First byte/type tag,
+  or zero for null/empty input.
+- `template<typename T> bool readPacket(const void* data, unsigned int len, T* out)` — Copy the fixed struct if pointers are non-null and the buffer is at least
+  `sizeof(T)`. This helper does not validate a type tag or a trailing payload.
 
-- `bool startHost(int port, MainThreadQueue* inbound)` — Listen as host on `port`; inbound states go to `inbound`. Return: success.
-- `bool startClient(const std::string& ip, int port, MainThreadQueue* inbound)` — Connect to `ip:port`. Return: success.
-- `void stop()` — Signal the net thread to stop and join it.
-- `void setLocalState(const PlayerStatePacket& p)` — **Main thread**: publish this client's transform for the net thread to transmit. Thread-safe.
-- `void setNpcStates(const NpcStateEntry* arr, unsigned count)` — **Main thread (host)**: publish the nearby-NPC batch to broadcast. Thread-safe (copies under lock).
-- `void setSquadStates(u32 ownerId, const NpcStateEntry* arr, unsigned count)` — **Main thread (both peers)**: publish this client's OWN squad members, tagged `ownerId`. Bidirectional. Thread-safe.
-- `bool isRunning() const` — Whether the net thread is live.
-- `u32 localId() const` — This client's assigned network player id.
+[`src/prototest/main.cpp`](../src/prototest/main.cpp) contains the wire layout
+and round-trip assertions; those declarations/assertions, not a duplicated
+historical packet table, define the precise packet shapes.
 
-## 12. `MainThreadQueue`
+## 11. `NetLink`
 
-`src/plugin/MainThreadQueue.h` — namespace `coop`. The thread bridge: the net
-thread pushes copied PODs; the main-thread tick drains them at a safe point
-(Win32 `CRITICAL_SECTION`, no `std::mutex` for VS2010).
+[`src/plugin/net/NetLink.h`](../src/plugin/net/NetLink.h) — namespace `coop`.
+Owns ENet on a dedicated background thread; the game thread never touches
+`ENetHost`. Inbound messages cross through `Inbound`; the main thread publishes
+owned state and queues reliable events under locks.
 
-- `struct OwnedNpcState { u32 ownerId; NpcStateEntry e; }` — a received squad member plus its owner's network id.
-- `void push(const PlayerStatePacket& p)` — *Net thread*: enqueue a player state.
-- `void drain(std::deque<PlayerStatePacket>& out)` — *Main thread*: move all pending player states into `out` (swapped; leaves the queue empty).
-- `void pushNpc(const NpcStateEntry& e)` — *Net thread*: enqueue an NPC transform.
-- `void drainNpc(std::deque<NpcStateEntry>& out)` — *Main thread*: drain NPC transforms.
-- `void pushSquad(u32 ownerId, const NpcStateEntry& e)` — *Net thread*: enqueue an owner-tagged squad member.
-- `void drainSquad(std::deque<OwnedNpcState>& out)` — *Main thread*: drain squad members.
+- `bool startHost(int port, Inbound* inbound, NetTransport transport)`
+  / `bool startClient(const std::string& ip, int port, Inbound* inbound, NetTransport transport)` — Stop/reap any previous worker and launch a new one.
+  True means **launch accepted**, not listening/connected: transport opening and
+  handshake are asynchronous. Steam requires the tunnel to be initialized and
+  its peers set; UDP uses plain ENet UDP.
+- `void stop()` — Stop/reap the worker and reset lifecycle status to `NET_IDLE`.
+- `void copyStatus(NetStatus* out) const` — Coherent lifecycle facts: role,
+  requested vs active transport, phase, error, handshake count and accepted
+  membership mask. Raw ENet peer counts are not the accepted player roster.
+- `void setOwnedEntities(u32 ownerId, const EntityState* arr, unsigned int count)` — Copy the latest owned-entity snapshot for retransmission; zero publishes nothing.
+- `void queueEvent(const EventPacket& ev)` — Copy a reliable one-shot transition;
+  the network thread drains/sends it next tick.
+- `bool isRunning() const` — Worker-running flag, not transport/world readiness.
+- `u32 localId() const` — Host id zero, or the join's id assigned by WELCOME.
+- `void copyDebugStats(NetDebugStats* out) const` — Coherent traffic sample,
+  zeroed when stopped. ENet payload counters are sampled about once per second
+  in every build; diagnostic log streaming is separate and Harness-only.
+
+The header also declares the domain-specific reliable queue methods for
+inventory, world items, save/load and other replicated state. Their full
+signatures and ordering contracts live there.
+
+## 12. `Inbound`
+
+[`src/plugin/core/Inbound.h`](../src/plugin/core/Inbound.h) — namespace `coop`.
+The Win32 `CRITICAL_SECTION`-protected network-to-game bridge. The network thread
+queues owned packet data, never engine memory; the safe main-thread tick drains
+it. Variable-length messages own copied payload vectors rather than borrowing
+network buffers.
+
+- `InboundEntity { u32 ownerId; u32 sendMs; EntityState e; }` — Owner-tagged
+  entity with the sender's capture timestamp for interpolation.
+- `void pushConnect(u32 id)` / `void pushLeave(u32 id)` — Network-thread presence edges.
+- `void pushEntity(u32 ownerId, u32 sendMs, const EntityState& e)` — Queue a
+  received entity and latch peer readiness.
+- `void drainConnects(std::deque<u32>& out)` / `void drainLeaves(std::deque<u32>& out)`
+  / `void drainEntities(std::deque<InboundEntity>& out)` — Main-thread swaps;
+  output deques must be empty on entry.
+- `bool sawRemoteEntity()` — Whether a peer entity has arrived in the current world.
+- `u32 sessionGeneration()` — Generation for rejecting stale captured references.
+- `void flushWorldState()` — Clear registered world-state queues, reset peer
+  readiness and increment the generation after reload/reconnect/disconnect.
+  Session-preserving presence and coordinated save/load handshake queues survive.
+
+Domain-specific push/drain methods are declared in the header. Inventory
+snapshots and transfer verdicts drain together under one lock; save
+BEGIN/FILE/DONE also drain together so a completion cannot overtake its payload.
+Latest-state mailboxes have bounded drop-oldest storage; do not apply that policy
+to reliable transaction events.
 
 ## 13. `CoopLog`
 
@@ -961,7 +1005,7 @@ in-game input; OIS is the lower layer beneath it.
 
 ## 16. Native UI companion C ABI
 
-`src/ui/CoopUiApi.h` is a Windows x64 POD C contract, API version 1, with
+[`src/ui/CoopUiApi.h`](../src/ui/CoopUiApi.h) is a Windows x64 POD C contract, API version 1, with
 explicit 8-byte packing and `__cdecl`. No STL, engine pointers, ownership
 transfer or network hooks cross this boundary.
 
@@ -990,8 +1034,10 @@ The window, Cyrillic font, clipboard and connection banner live in
 and focus methods. It never copies the engine's internal `UString` layout.
 Fields hold editable drafts; valid drafts are committed on blur, hide or start.
 Both UDP forms mirror one canonical port because the C ABI/config expose one.
-The nick editor permits overflow to be validated against the 63-byte UTF-8
-limit; the Paste button rejects oversized input before the truncating parser.
+The nick editor permits overflow so input longer than the 63-byte UTF-8
+limit can be rejected before parsing would truncate it. It has no Paste button;
+native Ctrl+V is available. Paste buttons belong to the Steam host ID and UDP
+endpoint/port fields and normalize input using those fields' parsers.
 Tab/Shift+Tab cycle visible fields; Enter queues a validated start. Focus holds
 an `InputHandler::controlEnabled` lease, released on hide/reset/shutdown without
 enabling game controls over another native EditBox's focus. F2/Esc act only in
@@ -1005,7 +1051,8 @@ recycled entries in the GUI's list.
 `game/EngineUi.cpp` retains only the entity marker/damage HUD; the old
 `EngineUi.h` panel facade is removed. Widgets refresh at 10 Hz without rewriting
 active text/carets. The two-column panel shows real network/world milestones,
-bounded transfer progress and accepted players. Diagnostics are collapsed by
-default; overflowing rows point to the complete copy-report. Diagnostic rates
-are sampled once per second. Updater messages have their own secondary section.
+bounded transfer progress and accepted players. Diagnostics open in a separate
+movable native window with a scrollbar for the full redacted payload; Copy report
+provides a redacted diagnostic export. Network traffic rates are sampled about
+once per second. Updater messages have their own secondary section.
 

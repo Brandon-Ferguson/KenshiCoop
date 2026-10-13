@@ -1,11 +1,18 @@
 # Replication pitfalls and gate design
 
-> **Purpose.** Hard-won failure modes in KenshiCoop's item/world replication, and
-> the testing habits that did or did not catch them. Each entry states a rule, the
-> concrete bug that produced it, and the signature to grep for. This is not a
-> changelog — per-protocol narrative lives in `resources/PROTOCOL_HISTORY.md`
-> (which is untracked, hence this file).
+> **Purpose.** Hard-won failure modes in KenshiCoop4up's item/world replication,
+> inherited from and developed on [KenshiCoop by nhoral](https://github.com/nhoral/KenshiCoop),
+> and the testing habits that did or did not catch them. KenshiCoop4up is
+> independently maintained by kotetsyy; the original project's authorship
+> remains nhoral's. Each entry states a rule, the concrete bug that produced it,
+> and the signature to grep for. This is engineering evidence, not a changelog
+> or a claim that every historical fix/gate validates the current release.
 >
+> Historical protocol numbers, session results and fault-injection examples below
+> retain their original context. The public interface reference is
+> [API_REFERENCE.md](API_REFERENCE.md); current packet contracts live in
+> [`src/netproto/Wire.h`](../src/netproto/Wire.h), which wins on conflict.
+> No unavailable private protocol-history document is required to use this file.
 > Most entries generalise past items: they are really about drawing conclusions
 > from engine reads, and about writing gates that can fail.
 
@@ -73,9 +80,9 @@ cannot find its own copy. That is safe only if the item is genuinely absent —
 and "my search didn't find it" is a much weaker claim, because **search scope**
 is part of the search.
 
-`dropItemFromInventory` reads top level only, on purpose (see the `includeNested`
-note in `PROTOCOL_HISTORY.md`: a bagged item belongs to a different `Inventory`
-and must not be counted as the character's loose kit). But hoovering
+`dropItemFromInventory` reads top level only, on purpose: a bagged item belongs
+to a different `Inventory` and must not be counted as the character's loose kit
+(the `includeNested` distinction). But hoovering
 a pile of loot into one character overflows the grid and Kenshi stows the tail in
 the worn backpack. The mirror then declared the item missing and fabricated one,
 leaving the real item in the bag **and** a minted duplicate on the ground. Four

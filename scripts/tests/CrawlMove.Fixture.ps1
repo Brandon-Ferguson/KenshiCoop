@@ -88,7 +88,8 @@ function New-CrawlSample {
     }
     $bs = 8 + ($Prone -shl 9)   # BODY_CRAWL | prone field
     return ("[$stamp] SCENARIO CRAWL hand=7,3 t=$Ms prone=$Prone crip=$Crip " +
-            ("pos={0:F2},5.00,50.00 bs=$bs mv=$Mv spd=1.20" -f $x))
+            [string]::Format([Globalization.CultureInfo]::InvariantCulture,
+                "pos={0:F2},5.00,50.00 bs=$bs mv=$Mv spd=1.20", $x))
 }
 
 # The physics witness beside each sample. $Hk=0 = the body lost its physics
@@ -99,7 +100,8 @@ function New-CrawlProbe {
     $sec = [int][Math]::Floor($Ms / 1000)
     $stamp = "10:00:{0:00}.{1:000}" -f $sec, ($Ms % 1000)
     return ("[$stamp] SCENARIO CRAWLPROBE hand=7,3 t=$Ms " +
-            ("mv={0:F2},5.00,50.00 hk=${Hk}:{1:F2},0.50,5.00 " -f $X, ($X / 10.0)) +
+            [string]::Format([Globalization.CultureInfo]::InvariantCulture,
+                "mv={0:F2},5.00,50.00 hk=${Hk}:{1:F2},0.50,5.00 ", $X, ($X / 10.0)) +
             "mode=0 ao=0 tav=0.00,0.00,0.00 mot=1.00,0.00,1.00")
 }
 

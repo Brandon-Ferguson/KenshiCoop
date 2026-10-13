@@ -1,29 +1,44 @@
 # ENet (vendored dependency)
 
-KenshiCoop uses [ENet](http://enet.bespin.org/) for UDP networking (reliable +
-unreliable channels). ENet is a
-small, portable C library that compiles cleanly under both the VS2010 (v100)
-plugin toolchain and modern compilers.
+KenshiCoop uses [ENet](http://enet.bespin.org/) for reliable and unreliable UDP
+channels. Its external source is restored at a pinned revision and patched for
+the plugin's VS2010 (v100) toolchain; do not substitute the latest release or
+add a new submodule.
 
-We do not check ENet's source into this repo. Fetch it into this folder one of
-two ways.
+## Restore the pinned source
 
-## Option 1: git submodule (recommended)
-```bash
-git submodule add https://github.com/lsalzman/enet.git third_party/enet/enet
-git submodule update --init --recursive
+From the KenshiCoop repository root, on a fresh checkout:
+
+```bat
+git clone https://github.com/lsalzman/enet.git third_party/enet/enet
+git -C third_party/enet/enet checkout 5a9c537fd464b3c6d3c55e1d3bd47588faf71b42
+git apply third_party/enet/patches/0001-enet-c89-for-loops.patch
+git apply third_party/enet/patches/0002-enet-socket-hooks.patch
 ```
-This yields `third_party/enet/enet/include/enet/enet.h` and the `.c` sources.
 
-## Option 2: manual download
-Download a release from https://github.com/lsalzman/enet/releases and extract so
-that the headers live at `third_party/enet/enet/include/enet/enet.h`.
+Apply the patches in that order, once, to the pinned source. The resulting
+headers live at `third_party/enet/enet/include/enet/enet.h`. The C89 patch and
+socket-hook patch are tracked here; the fetched upstream source is not.
 
-## Build notes
-- The `nettest` CMake build (`src/nettest/CMakeLists.txt`) compiles ENet from
-  `third_party/enet/enet` directly, so no separate install is needed.
-- For the plugin (`KenshiCoop.dll`), add ENet's `include/` to the project includes
-  and either add the ENet `.c` files to the project or link a prebuilt
-  `enet.lib`. On Windows, ENet also needs `ws2_32.lib` and `winmm.lib`.
-- Define `ENET_STATIC` (or build ENet as part of the project) to avoid DLL export
-  issues when statically linking.
+## Build
+
+The existing plugin project already compiles the ENet C sources directly and
+configures its includes and Windows `ws2_32.lib` / `winmm.lib` dependencies.
+Do not add another ENet library or change project configuration to follow an
+unrelated CMake/nettest recipe. Build the matching core/UI pair from the root:
+
+```bat
+scripts\build_plugin.cmd Release
+```
+
+Use `Harness` explicitly for diagnostics; it is also the script's default.
+See [Build setup](../../docs/BUILD_SETUP.md) for the v100 / SDK 7.1 /
+KB2519277 `/MD` ABI requirements and the other pinned dependencies.
+
+## License and notices
+
+ENet is MIT-licensed. Preserve the upstream `LICENSE` copyright and permission
+notice with copies or substantial portions of ENet, including distributions
+containing it. Keep the pinned upstream source and these local patches available
+alongside the project's corresponding-source instructions; this README does
+not replace ENet's license text or the project's AGPL/dependency obligations.

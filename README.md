@@ -1,13 +1,15 @@
 # KenshiCoop4up
 
-**Форк [nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop) — оригинального
-кооп-мода для [Kenshi](https://lofigames.com/), созданного
-[nhoral](https://github.com/nhoral).**
+**KenshiCoop4up — самостоятельно развиваемая и поддерживаемая версия
+кооп-мода для [Kenshi](https://lofigames.com/), основанная на
+[nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop).**
 
-Весь мод — заслуга nhoral: архитектура, модель репликации, хуки в движок и
-практически весь код принадлежат ему. Этот форк существует только чтобы нести
-несколько правок сверху — см. [Что меняет форк](#что-меняет-форк). Лицензия
-[AGPL-3.0](LICENSE), как и у оригинала.
+Первоначальный автор KenshiCoop — [nhoral](https://github.com/nhoral):
+оригинальная архитектура, модель репликации, хуки в движок и исходный код —
+его работа. [kotetsyy](https://github.com/kotetsyy) сопровождает производную
+версию, её изменения и релизы, а не является автором оригинального мода.
+См. [Разработка KenshiCoop4up](#разработка-kenshicoop4up).
+Лицензия [AGPL-3.0](LICENSE) сохранена от оригинального проекта.
 
 🇷🇺 Русский (ниже) · [🇬🇧 English](#kenshicoop4up-english)
 
@@ -28,7 +30,7 @@
 > рассинхроны и вылеты. Два игрока — проверенный случай; три и четыре
 > реализованы, но в реальных сессиях не валидированы.
 
-## Что меняет форк
+## Разработка KenshiCoop4up
 
 - **Автообновление.** Все игроки обязаны запускать *одну и ту же* DLL: версия
   протокола жёстко проверяется при рукопожатии, поэтому одна устаревшая копия
@@ -69,8 +71,11 @@
 открытыми по новым отчётам. `v0.1.31` исправляет отдельную блокировку
 инвентаря, а не все эти случаи.
 
-Всё остальное — работа nhoral. Если вам нужен оригинальный, поддерживаемый мод,
-идите в [nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop).
+Направления разработки — устранение этих рассинхронов и потерь предметов,
+улучшение диагностики и проверка сценариев подключения, загрузки и передачи
+персонажей; проверка реальных сессий на 3–4 игроков остаётся отдельной задачей.
+Ручная сборка, проверки и подготовка релизов описаны в
+[docs/BUILD_SETUP.md](docs/BUILD_SETUP.md).
 
 ## Установка
 
@@ -174,26 +179,43 @@
 
 ## Экспериментальная диагностика сети
 
-Приватная ветка `debug/live-net-telemetry` собирается командой
-`scripts\build_plugin.cmd Harness`: это оптимизированная сборка с диагностикой,
-а не конфигурация VS Debug с отладочной CRT. Статистика находится в
-отдельном окне **«Диагностика»** и в **«Копировать отчёт»**;
-лог содержит строки `[net-diag]` раз в секунду. Байты/пакеты — локальный
-трафик ENet с повторами, не доказательство совпадения миров. Неизвестная
-готовность мира и отсутствующие измерения не выдаются за успешную синхронизацию.
-Ничего не выгружается автоматически.
+Публичные исходники включают конфигурацию Harness:
+`scripts\build_plugin.cmd Harness` собирает согласованную пару
+`KenshiCoop.dll` и `KenshiCoopUI.dll`. Это оптимизированная сборка с
+`KENSHICOOP_NET_DIAG`, а не конфигурация VS Debug с отладочной CRT.
+Release использует протокол **70**, Harness — диагностический протокол **71**.
+Все участники должны использовать одну и ту же пару из одной сборки;
+Release и Harness не соединяются друг с другом. Harness принудительно отключает
+публичный апдейтер, даже если в `coop_config.json` стоит `"updateEnabled": true`.
+Инструкции сборки и проверок — в [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md).
 
-Для теста отключите автообновление (`"updateEnabled": false` в
-`coop_config.json`), иначе публичный релиз может заменить диагностическую DLL.
-Участникам теста давайте доступ к исходникам приватного репозитория согласно
-AGPL-3.0. Экспериментальные коммиты остаются в приватной ветке; только
-проверенное исправление переносится отдельным коммитом в публичную `main`.
+Статистика находится в отдельном перемещаемом окне **«Диагностика»**
+со своей прокруткой и в **«Копировать отчёт»**; Harness пишет строки
+`[net-diag]` раз в секунду. Байты/пакеты — локальный трафик ENet с повторами,
+не доказательство совпадения миров. Неизвестная готовность мира и
+отсутствующие измерения не выдаются за успешную синхронизацию.
+
+После WELCOME Harness передаёт локальный лог клиента хосту по существующему
+соединению ENet, на канале массовых данных. Хост сохраняет его в
+`KenshiCoop_join_N_mirror.log`, отдельно от своего `KenshiCoop_host.log`;
+клиент сохраняет `KenshiCoop_join.log`. Передача ограничена восемью порциями
+до 960 байт в секунду; оставшиеся байты хранятся на диске, а передача сейва
+может задерживать доставку. Release не пересылает клиентские логи.
+
+Логи остаются на машинах участников; отдельной HTTP-выгрузки или внешнего
+сборщика нет. При Steam-транспорте игровое соединение может использовать
+ретранслятор Valve. Логи могут содержать имена игроков и игровые данные —
+делитесь ими приватно. При передаче экспериментальной сборки предоставляйте
+участникам соответствующие исходники согласно AGPL-3.0, включая изменения
+относительно публичного тега, если они есть.
 
 
 ## Благодарности
 
-- **[nhoral](https://github.com/nhoral) — автор KenshiCoop.** Этот форк —
-  его работа с несколькими правками сверху.
+- **[nhoral](https://github.com/nhoral) — первоначальный автор KenshiCoop:**
+  оригинальная архитектура, репликация, хуки в движок и исходный код.
+- [kotetsyy](https://github.com/kotetsyy) — сопровождение, изменения и релизы
+  производного проекта KenshiCoop4up
 - [BFrizzleFoShizzle](https://github.com/BFrizzleFoShizzle) — RE_Kenshi и
   KenshiLib, без которых такие плагины невозможны
 - [lsalzman/enet](https://github.com/lsalzman/enet) — сетевая библиотека UDP
@@ -205,20 +227,23 @@ AGPL-3.0. Экспериментальные коммиты остаются в 
 
 [AGPL-3.0](LICENSE), унаследована от оригинального проекта. KenshiLib и
 RE_Kenshi под GPLv3; плагин линкуется с KenshiLib по GPLv3 §13 (сочетание
-GPL/AGPL). Не аффилировано с Lo-Fi Games. Некоммерческий фанатский проект.
+GPL/AGPL). Не аффилировано с Lo-Fi Games. Некоммерческий фанатский проект
+по замыслу авторов; это не дополнительное ограничение прав по лицензии.
 
 ---
 
 # KenshiCoop4up (English)
 
-**A fork of [nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop) — the original
-co-op mod for [Kenshi](https://lofigames.com/), created by
-[nhoral](https://github.com/nhoral).**
+**KenshiCoop4up is an independently developed and maintained co-op mod for
+[Kenshi](https://lofigames.com/), based on
+[nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop).**
 
-All credit for the mod itself goes to nhoral: the architecture, the replication
-model, the engine hooks and nearly all of the code are theirs. This fork exists
-only to carry a few changes on top — see [What this fork changes](#what-this-fork-changes).
-Licensed [AGPL-3.0](LICENSE), like the original.
+[nhoral](https://github.com/nhoral) is KenshiCoop's original author: the original
+architecture, replication model, engine hooks and source code are their work.
+[kotetsyy](https://github.com/kotetsyy) maintains this derivative, its changes
+and releases, and is not the author of the original mod.
+See [KenshiCoop4up development](#kenshicoop4up-development).
+The original project's [AGPL-3.0](LICENSE) license is retained.
 
 [🇷🇺 Русский](#kenshicoop4up) · 🇬🇧 English (below)
 
@@ -236,10 +261,10 @@ speed, and more. Saves are coordinated: any save either player makes becomes one
 shared save, streamed to both machines automatically.
 
 > **Status: work in progress.** A hobby project under active development. Expect
-> rough edges, desyncs, and crashes. Two players is the well-tested case; three
+> rough edges, desyncs, and crashes. Two players is the tested case; three
 > and four are implemented but not validated in real sessions.
 
-## What this fork changes
+## KenshiCoop4up development
 
 - **Self-update.** Every player must run the *same* DLL — the protocol version is
   a hard gate at handshake, so a single stale copy just reads as "it will not
@@ -279,8 +304,11 @@ New reports of direct-trade item loss, differing merchant stock, time and positi
 desynchronization, upstairs beds and combat animations remain open. `v0.1.31`
 fixes a separate inventory-update blockage, not all of those cases.
 
-Everything else is nhoral's work. If you are looking for the original,
-supported mod, go to [nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop).
+Development focuses on resolving these desyncs and item losses, improving
+diagnostics, and checking connection, world-loading and character-handoff
+scenarios; validation of real 3–4-player sessions remains a separate task.
+The manual build, checks and release preparation process is documented in
+[docs/BUILD_SETUP.md](docs/BUILD_SETUP.md).
 
 ## Install
 
@@ -364,11 +392,14 @@ some units into another squad tab in-game.
 
 ## Experimental network diagnostics
 
-Build the private `debug/live-net-telemetry` branch with
-`scripts\build_plugin.cmd Harness`. This optimized diagnostic pair uses **private
-protocol 71**; the ordinary Release pair uses protocol 70. Host and join
-must both use the same build pair. This private build disables public auto-updates
-even if a tester's `coop_config.json` still has `"updateEnabled": true`.
+The public sources include the Harness configuration:
+`scripts\build_plugin.cmd Harness` builds a matching `KenshiCoop.dll` and
+`KenshiCoopUI.dll` pair. It is an optimized build with `KENSHICOOP_NET_DIAG`,
+not VS Debug with the debug CRT. Release uses protocol **70**; Harness uses
+diagnostic protocol **71**. Every participant must use the same pair from the
+same build; Release and Harness cannot connect to each other. Harness forcibly
+disables the public updater even if `coop_config.json` has `"updateEnabled": true`.
+See [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) for build and check instructions.
 
 Both configurations pause the host simulation until every connected join reports
 the READY id for its current `LOAD_GO` after the new world becomes live, including
@@ -387,29 +418,31 @@ Streaming an existing ground item no longer announces a fresh drop. Merchant
 stock comes from the actual shop furniture, including distinct blueprints,
 not just the NPC's character inventory. All peers must update both DLLs.
 
-Local ENet rates appear in the collapsible **Diagnostics** block and **Copy
-report**, not a separate always-on overlay. Once a JOIN completes WELCOME, the
-debug DLL mirrors its full local log over the existing ENet connection, on the
-bulk channel. The host writes it to `KenshiCoop_join_N_mirror.log` separately
-from its own `KenshiCoop_host.log`; the join retains `KenshiCoop_join.log`.
-Forwarding is bounded to eight chunks of up to 960 bytes per second; pending
-bytes stay on disk. Save transfer can delay the bulk channel. These are
-observations from two machines, **not** an automatic verdict that their worlds
-match. Public builds do not forward client logs.
+Local ENet rates appear in the separate movable **Diagnostics** window with
+its own scrolling and in **Copy report**. Harness logs `[net-diag]` lines once
+per second. Rates include ENet retransmissions, not proof that worlds match;
+unknown world readiness and missing measurements are not reported as success.
 
-This chat has no direct connection to a tester's PC: live analysis means reading
-the combined log on the host machine during a session. There is no separate
-HTTP upload or outside log collector. With Steam transport, the existing game
-connection may use Valve's relay. Logs may contain player names and game data;
-share them privately. Give testers access to the private source under AGPL-3.0.
-Experimental commits stay on the private branch; move only verified fixes to
-public `main` in separate commits.
+Once a JOIN completes WELCOME, Harness mirrors its full local log over the
+existing ENet connection, on the bulk channel. The host writes it to
+`KenshiCoop_join_N_mirror.log` separately from its own `KenshiCoop_host.log`;
+the join retains `KenshiCoop_join.log`. Forwarding is bounded to eight chunks
+of up to 960 bytes per second; pending bytes stay on disk. Save transfer can
+delay the bulk channel. Release builds do not forward client logs.
+
+Logs remain on the participants' machines; there is no separate HTTP upload
+or outside log collector. With Steam transport, the existing game connection
+may use Valve's relay. Logs may contain player names and game data; share them
+privately. When distributing an experimental build, provide participants with
+its matching source under AGPL-3.0, including any changes from the public tag.
 
 
 ## Credits
 
-- **[nhoral](https://github.com/nhoral) — author of KenshiCoop.** This fork is
-  their work with a few changes on top.
+- **[nhoral](https://github.com/nhoral) — original author of KenshiCoop:**
+  the original architecture, replication, engine hooks and source code.
+- [kotetsyy](https://github.com/kotetsyy) — maintenance, changes and releases
+  of the derivative KenshiCoop4up project
 - [BFrizzleFoShizzle](https://github.com/BFrizzleFoShizzle) — RE_Kenshi and
   KenshiLib, which make plugins like this possible
 - [lsalzman/enet](https://github.com/lsalzman/enet) — UDP networking library
@@ -421,5 +454,5 @@ public `main` in separate commits.
 
 [AGPL-3.0](LICENSE), inherited from the original project. KenshiLib and
 RE_Kenshi are GPLv3; this plugin links KenshiLib under GPLv3 section 13
-(GPL/AGPL combination). Not affiliated with Lo-Fi Games. Non-commercial fan
-project.
+(GPL/AGPL combination). Not affiliated with Lo-Fi Games. Intended as a
+non-commercial fan project; this intent adds no restriction to the license rights.
