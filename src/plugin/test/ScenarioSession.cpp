@@ -1363,7 +1363,7 @@ public:
         : TimedScenario("squad_meta_probe", /*evidenceMs=*/0),
           preDone_(false), writeDone_(false), midDone_(false),
           hostFacDone_(false), writesOk_(false), puppetSamples_(0),
-          lastPuppetMs_(0), saveIssued_(false), saveOk_(false),
+          lastPuppetMs_(0), ackBase_(0), saveIssued_(false), saveOk_(false),
           ackSeen_(false), ackOk_(false), loadIssued_(false), loadOk_(false),
           sigWas2_(false), swapDone_(false), postDone_(false),
           dropStartMs_(0), sigClearedMs_(0), checkAtMs_(0), lastStatusMs_(0) {}
@@ -1412,7 +1412,7 @@ public:
         }
 
         // Q4: does a permajob wake an AI-suppressed puppet on the host?
-        if (ctx.isHost && writeDone_ && puppetSamples_ < PUPPET_SAMPLES &&
+        if (ctx.isHost && writeDone_ && live && puppetSamples_ < PUPPET_SAMPLES &&
             ctx.elapsedMs - lastPuppetMs_ >= 1000) {
             lastPuppetMs_ = ctx.elapsedMs;
             ++puppetSamples_;
@@ -1436,11 +1436,16 @@ public:
             }
             if (hostFacDone_ && !saveIssued_ && live && ctx.elapsedMs >= SAVE_AT_MS) {
                 saveIssued_ = true;
+                // A connect-time NACK transfer may already have left an ACK
+                // behind; only an ACK newer than this one is for OUR save.
+                ackBase_ = savexfer::lastAckXferId();
                 saveOk_ = engine::saveGameAs(SAVE_NAME);
-                smLog("SCENARIO SMSAVE name='%s' ok=%d t=%lu", SAVE_NAME,
-                      saveOk_ ? 1 : 0, ctx.elapsedMs);
+                smLog("SCENARIO SMSAVE name='%s' ok=%d ackBase=%u t=%lu", SAVE_NAME,
+                      saveOk_ ? 1 : 0, (unsigned)ackBase_, ctx.elapsedMs);
             }
-            if (saveIssued_ && !ackSeen_ && savexfer::lastAckXferId() != 0) {
+            if (saveIssued_ && !ackSeen_ &&
+                savexfer::lastAckXferId() != 0 &&
+                savexfer::lastAckXferId() != ackBase_) {
                 ackSeen_ = true;
                 ackOk_ = (savexfer::lastAckOk() == 1);
                 smLog("SCENARIO SMACK ok=%d t=%lu", ackOk_ ? 1 : 0, ctx.elapsedMs);
@@ -1652,6 +1657,7 @@ private:
     bool          preDone_, writeDone_, midDone_, hostFacDone_, writesOk_;
     unsigned int  puppetSamples_;
     unsigned long lastPuppetMs_;
+    u32           ackBase_; // lastAckXferId() when our save was issued
     bool          saveIssued_, saveOk_, ackSeen_, ackOk_;
     bool          loadIssued_, loadOk_, sigWas2_, swapDone_, postDone_;
     unsigned long dropStartMs_, sigClearedMs_, checkAtMs_, lastStatusMs_;
