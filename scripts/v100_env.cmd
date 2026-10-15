@@ -24,8 +24,13 @@ set "KL=%REPO%\third_party\KenshiLib_deps"
 set "ENET=%REPO%\third_party\enet\enet\include"
 
 REM Locate MSBuild via vswhere (falls back to a common path).
+REM for /f runs its command through cmd /c, which strips the first and last quote
+REM of a line that starts with a quote and contains "(x86)" - mangling the path.
+REM Leading with CALL and expanding VSWHERE only in the child avoids both that and
+REM the "(x86)" parenthesis closing the for-list.
 set "MSBUILD="
-for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" 2^>nul`) do set "MSBUILD=%%i"
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+for /f "usebackq delims=" %%i in (`call "%%VSWHERE%%" -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" 2^>nul`) do set "MSBUILD=%%i"
 if not defined MSBUILD set "MSBUILD=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
 
 REM x64 native toolchain on PATH so cl.exe finds its sibling DLLs (mspdb100, etc).

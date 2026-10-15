@@ -60,3 +60,22 @@ index 75eaa5f..e7a1311 100644
  
  enum BuildingFunction;
  
+diff --git a/KenshiLib/Include/kenshi/combat/CombatClass.h b/KenshiLib/Include/kenshi/combat/CombatClass.h
+index ef7cf2b..04be12f 100644
+--- a/KenshiLib/Include/kenshi/combat/CombatClass.h
++++ b/KenshiLib/Include/kenshi/combat/CombatClass.h
+@@ -4,10 +4,10 @@
+ #include <ogre/OgreMemoryAllocatorConfig.h>
+ #include <ogre/OgreVector3.h>
+ #include <ogre/OgreQuaternion.h>
+-#include "Enums.h"
+-#include "util/lektor.h"
+-#include "util/hand.h"
+-#include "util/OgreUnordered.h"
++#include "../Enums.h"
++#include "../util/lektor.h"
++#include "../util/hand.h"
++#include "../util/OgreUnordered.h"
+ 
+ class Character;
+ class Damages;
