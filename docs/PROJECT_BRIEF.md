@@ -1,0 +1,161 @@
+# Kenshi Co-op Mod — Project Brief
+
+Read this first before working on the mod. It records the research and decisions from the
+original planning (October 15, 2026).
+
+## Who and what
+
+- **Owner:** Brandon (GitHub: Brandon-Ferguson). First-time modder; experienced with Godot/GDScript,
+  new to C++ and to this codebase. Explain C++/Windows build concepts plainly, but don't
+  dumb down the engineering.
+- **Goal:** host-your-own online co-op for Kenshi. One player hosts on their own PC, friends
+  join over the internet (not LAN). Target **2 players rock-solid**, support **up to 4**.
+  No persistent/dedicated server and no MMO features.
+- **Testing:** Brandon tests with a remote partner, so every feature must work across a
+  real internet connection (Steam P2P preferred, so no port forwarding is needed).
+- **Build machine:** Windows only. Kenshi and the v100 toolchain do not run on macOS.
+
+## What this repo is
+
+Brandon-Ferguson/KenshiCoop: forked from nhoral/KenshiCoop, then fast-forwarded to
+**kotetsyy/KenshiCoop4up** (remote `upstream`), which is a fork of nhoral's original.
+
+- `nhoral/KenshiCoop` is the original co-op mod (last update Aug 10, 2026, v0.51). Two
+  players is its design target.
+- `kotetsyy/KenshiCoop4up` contains all of nhoral's history plus ~25 more releases
+  through Oct 13, 2026 (v0.1.31): 3–4 player support (implemented, but its README says
+  3–4 is not validated in real sessions), a player roster, native co-op UI, Unicode save
+  bootstrap, 100 Hz entity snapshots, merchant stock fixes, combat target fixes, and more.
+- We use the 4up line as our base because it is the actively maintained superset.
+  Pull future upstream fixes with `git fetch upstream` and merge.
+
+### License (must follow)
+
+AGPL-3.0, and it links KenshiLib (GPLv3). Our fork must stay public and open source under
+AGPL-3.0, keep the existing LICENSE, and keep credits to **nhoral** (original mod),
+**kotetsyy** (4-player fork), and **BFrizzleFoShizzle** (RE_Kenshi + KenshiLib).
+Don't remove attribution from README or source headers.
+
+## How the mod works (architecture summary)
+
+- Kenshi modding has two layers. The official FCS editor makes *data* mods (items,
+  factions, game starts) and can't do networking. Multiplayer lives in *native code*:
+  **RE_Kenshi** (free on Nexus, mod 847) loads plugin DLLs into the game, and
+  **KenshiLib** exposes Kenshi's internal classes so we can read state and hook functions.
+- `KenshiCoop.dll` (core, `src/plugin/`) is loaded by RE_Kenshi, hooks the engine through
+  KenshiLib, and does all game mutation on the main thread. `KenshiCoopUI.dll`
+  (`src/ui/`) is the F2 panel; the core loads it. They talk only through the C ABI in
+  `src/ui/CoopUiApi.h`.
+- Networking: ENet over UDP with an optional Steam P2P tunnel (`src/plugin/net/`).
+  Wire protocol headers are in `src/netproto/` (plain C++03).
+- Authority model: the **host is authoritative for the world**; **each player is
+  authoritative for their own squad**. Remote players' characters are AI-suppressed
+  "puppets" driven by the owner's updates.
+- Saves: while connected, the joiner's local saves are suppressed and the **host's save
+  is the only real save**; it is streamed to the joiners (`src/plugin/sync/SaveXfer.cpp`,
+  save edges in `src/plugin/Plugin.cpp`).
+- Key source areas: `sync/Replicator*.cpp` (what gets replicated and who owns it),
+  `game/Engine*.cpp` (wrappers around Kenshi internals), `net/NetLink.cpp` (connections,
+  disconnects), `test/Scenario*.cpp` (automated scenarios), `scripts/` (build, deploy,
+  two-client test harness, regression suite).
+- **Read `docs/REPLICATION_PITFALLS.md` before changing any sync code.** It records
+  hard-won rules, e.g. budget in milliseconds not ticks, never conclude from a single
+  engine read, fabrication must prove absence.
+
+## Build environment (Windows only)
+
+Follow `docs/BUILD_SETUP.md` exactly. Summary of what must be installed:
+
+- **Visual C++ 2010 x64 compiler (v100), Windows SDK 7.1, and KB2519277.** KenshiLib
+  requires the v100 ABI; a modern compiler is NOT a substitute.
+- **VS2022 Build Tools** (only for MSBuild orchestration; `vswhere` finds it).
+- **Git LFS** (KenshiLib libraries and the Boost archive are LFS files).
+- Restore dependencies at the **pinned revisions** listed in `docs/BUILD_SETUP.md`
+  (KenshiLib_Examples_deps at b566d74…, apply `kenshilib-v100.patch`; ENet at 5a9c537…,
+  apply both ENet patches). Set `KENSHILIB_DIR` and `BOOST_INCLUDE_PATH`.
+- Build: `scripts\build_plugin.cmd Release` (or `Harness` for the test scenarios).
+- Verify without touching the game: `pwsh -NoProfile -File scripts/verify.ps1`.
+- Package: `pwsh -NoProfile -File scripts/make_mod_kit.ps1 -Configuration Release -SkipBuild`
+  produces `dist/KenshiCoop-kit.zip` (core DLL, UI DLL, .mod, RE_Kenshi JSON).
+- **Careful:** `scripts\deploy.cmd` writes into the Kenshi install AND
+  `%USERPROFILE%\Kenshi-Join` if it exists. Keep both games closed, and confirm with
+  Brandon before deploying.
+
+### Game requirements
+
+- **Kenshi 1.0.65 runtime, windowed mode.** The mod hard-codes 1.0.65 addresses
+  (e.g. `EngineInventory.cpp`, `EngineWorld.cpp`), so the game must *run* as 1.0.65.
+- **Steam's Kenshi is 1.0.68; RE_Kenshi handles it.** Install **RE_Kenshi v0.3.5+** with its
+  installer (github.com/BFrizzleFoShizzle/RE_Kenshi releases). On 1.0.68 the installer builds
+  a downgraded **1.0.65** exe at `<Kenshi>\RE_Kenshi\kenshi_x64.exe` and adds
+  `Plugin=RE_Kenshi` first in `Plugins_x64.cfg`. The main menu then reads
+  "RE_Kenshi v0.3.5 - Kenshi 1.0.65", which is the check that the setup is right. No Steam
+  downgrade is needed. The root `kenshi_x64.exe` stays 1.0.68 (`--norekenshi` launches it
+  vanilla). This is the setup on Brandon's dev machine.
+- If Steam updates Kenshi again, rerun the RE_Kenshi installer and recheck the main-menu
+  text before testing. Every player needs the same setup and should confirm the same
+  "Kenshi 1.0.65" text.
+- RE_Kenshi's log is `<Kenshi>\RE_Kenshi_log.txt`. Undo: the installer's Uninstall, or
+  remove the `Plugin=RE_Kenshi` line from `Plugins_x64.cfg`.
+- Mod logs: `<Kenshi>\KenshiCoop_*.log`. Crash dumps: `crashDump1.0.65_x64.dmp` in the
+  Kenshi folder.
+- Every player must run the **identical build** (protocol mismatch is rejected at
+  handshake) and should run the identical mod list and load order.
+
+## Bug list (our work queue)
+
+Sources: nhoral/KenshiCoop GitHub issues (#65, #67, #72, #74, #84, #86), the v0.50
+release notes, YouTube/Steam player feedback. "Unverified" means the fork may have
+fixed it. Reproduce in a real session before claiming a fix.
+
+| # | Bug | Source | Status in code | Priority |
+|---|-----|--------|----------------|----------|
+| 1 | Joiner's squad names, player faction name, and job queues are wiped on every save cycle. Host-set data survives; joiner-set data doesn't. | #74 | **CONFIRMED.** Nothing replicates squad display names, faction name, or job lists from joiner to host. The host's serialized save lacks them and is pushed back over the joiner's local state. | **High — start here** |
+| 2 | Access-violation crash, frames `KenshiCoop.dll+0x211bf` / `+0x21388`, during save-transfer staging and right after `SCENARIO PROXY` squad creations. Fires repeatedly per evening. Possibly same as nhoral #31 ("crash from faction squad appearing"). | #74 | Those two frames are likely the plugin's own crash handler; the real fault is EXECUTE of an unmapped address (same low offset `...E567` each time → jump into an unloaded module or stale function pointer). Need the dump; the reporter attached `KenshiCoop-crash-evidence.zip` to nhoral/KenshiCoop issue #74. | High |
+| 3 | Fighting side by side: the joiner's character lands ~1 hit in 50. Fighting apart is fine. | #67 | Fork changed combat target translation (v0.1.16) and combat cohesion (v0.46). Unverified. | High |
+| 4 | Host crashes instead of disconnecting cleanly when a friend quits or times out. | v0.50 notes | Disconnect paths changed in the fork (`net/NetLink.cpp`). Unverified. | High |
+| 5 | Joiner connects but sees no characters; time of day differs. Tried Steam, UDP, Tailscale, Hamachi, Radmin. | #86 | Unverified. | High if we hit it |
+| 6 | Can't see or heal the other player's characters' health. | #72 | Partial medic animation sync; health readout not replicated. | Medium |
+| 7 | Lockpicking and stealth knockouts don't sync, causing follow-on desyncs. | #72 | Some handling exists. Unverified. | Medium |
+| 8 | Shop shelf/table items don't sync (duplication exploit). | #72 | Fork v0.1.27 "complete merchant stock". Unverified. | Medium |
+| 9 | Kidnap / imprisonment desync. | #65 | Unverified. | Medium |
+| 10 | Large groups teleport (~2 position updates/sec). | v0.50 notes | Fork moved to 100 Hz snapshots (v0.1.25). Unverified. | Medium |
+| 11 | Can't put the other player's unconscious character in a bed. | #72 | Unverified. | Low |
+| 12 | Street props (e.g. Hub sleeping bags) placed differently per player each load. | #72 | Unverified. | Low |
+| 13 | Research bench not using books. | #84 | Unverified. | Low |
+| 14 | No mod-list/version parity check at connect (cost reporters hours of confusion). | #74 | Missing. Cheap win. | Medium |
+
+## How we work
+
+1. **Build first.** Before touching code, get a clean Release build and run
+   `scripts/verify.ps1` so we know the toolchain is right.
+2. **Baseline play test.** Brandon and his test partner play the current build for
+   ~30–60 minutes, fighting together, trading, saving and loading, and disconnecting.
+   Collect both players' `KenshiCoop_*.log`, `RE_Kenshi_log.txt`, and any crash dumps.
+   This tells us which "unverified" bugs are real.
+3. **One bug per branch** (`fix/<short-name>`), small commits, clear messages. Add or
+   extend a scenario in `src/plugin/test/` plus an oracle in `scripts/oracles/` when a
+   bug can be automated. The repo's own rule is that a gate must be able to fail.
+4. **Protocol changes:** any change to wire packets bumps the protocol number in
+   `src/netproto/Wire.h` (see the comment there). Both players must update together.
+5. **Before every deploy or game launch, say what will be written where and ask
+   Brandon.** He may be mid-campaign.
+6. Keep the bug table above updated as bugs are confirmed, fixed, or ruled out.
+
+## Ideas for later (not now)
+
+- Separate wallets per player (Kenshi has one player wallet; currently shared).
+- Who controls pause/game speed (host only, all must agree, or no pause in MP).
+- A friendlier lobby than swapping Steam IDs.
+- Validate 3–4 player sessions for real.
+
+## First steps
+
+1. Confirm the repo state (`git remote -v`, `git log --oneline -5`) and that we're on the
+   `brandon-fixes` branch.
+2. Check what's installed on this Windows machine (Git, Git LFS, VS2022 Build Tools,
+   VC++ 2010 v100 toolset, Windows SDK 7.1, PowerShell 7, Kenshi + version, RE_Kenshi),
+   then walk Brandon through installing whatever's missing per `docs/BUILD_SETUP.md`.
+3. Get a clean build and a passing `verify.ps1`.
+4. Then start on **Bug #1** (squad names / faction name / job queues) with a design plan
+   before writing code.
