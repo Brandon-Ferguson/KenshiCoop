@@ -314,6 +314,29 @@ void charName(Character* c, char* out, unsigned int cap);
 // null/empty/fault. Used to stamp a co-op nick onto the unit a player owns.
 void charSetName(Character* c, const char* name);
 
+// ---- Bug #1 (squad_meta_probe): squad / faction names, permanent jobs ------
+// Values the join can change that the host's save never learns about. All
+// SEH-guarded; a false/-1 return means unreadable, not "empty".
+//
+// Display name of the squad tab (ActivePlatoon) that 'c' belongs to.
+bool squadNameOf(Character* c, char* out, unsigned int cap);
+bool setSquadNameOf(Character* c, const char* name);
+// Display name of the shared player faction (gw->player->getFaction()).
+bool playerFactionName(GameWorld* gw, char* out, unsigned int cap);
+bool setPlayerFactionName(GameWorld* gw, const char* name);
+// One permanent job (OrdersReceiver permajob slot): engine TaskType, subject
+// hand (readObjectHand layout: type, container, containerSerial, index,
+// serial; all zero = no subject) and location.
+struct PermajobRead { int type; unsigned int subj[5]; float x, y, z; };
+// Fills up to maxOut slots in list order and returns the TOTAL permajob count
+// (may exceed maxOut); -1 when the character or its orders are unreadable.
+int  readPermajobs(Character* c, PermajobRead* out, unsigned int maxOut);
+// Appends one job through OrdersReceiver::addJob (subj may be 0). Whether that
+// call appends to the permajob list at all is probe question 3.
+bool addPermajob(Character* c, int type, const unsigned int subj[5],
+                 float x, float y, float z);
+bool clearPermajobs(Character* c);
+
 // Debug marker HUD labels (KENSHICOOP_DEBUG_MARKERS, spike-47 substrate): mint
 // a colored text label pinned to a character; the engine's own projection
 // tracks the body every frame. colorId: 0 = green (host-driven), 1 = red

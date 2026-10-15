@@ -1511,6 +1511,22 @@
             Tier = 'full'; WanVariant = $false
         }
 
+        # squad_meta_probe: Bug #1 step 1 (docs/design/bug1-squad-meta.md). No
+        # channel yet - each side renames its own squad tab, the join renames the
+        # faction and both append JOB_MEDIC through OrdersReceiver::addJob; the
+        # host also appends one to the join's puppet and samples it, renames the
+        # faction itself, then coordinated-saves and loads. The oracle gates only
+        # that every step ran and prints the answers to the four design questions
+        # (tab identity, setName persistence, permajob add/order, puppet safety)
+        # as FINDING lines. clock_sync is not gated (the load restarts it).
+        squad_meta_probe = @{
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'squad_meta_probe'
+            Gating   = @('squad_meta_probe')
+            Advisory = @('smoothness', 'anim_truth', 'march', 'clock_sync')
+            Tier = 'probe'; WanVariant = $false
+        }
+
         # bootstrap_stream: the missing-save "seamless join" proof (protocol
         # 31/32). NOT a run_test tier member and NOT run_test-drivable - it needs
         # the join-from-MENU launch (join has NO save, goes ONLINE, host bakes +

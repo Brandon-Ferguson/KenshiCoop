@@ -161,6 +161,7 @@ function Invoke-OneOracle {
         "save_resume"    { return (Test-SaveResume     -HostFile $HostLog -JoinFile $JoinLog) }
         "load_sync"      { return (Test-LoadSync       -HostFile $HostLog -JoinFile $JoinLog) }
         "money_persist"  { return (Test-MoneyPersist   -HostFile $HostLog -JoinFile $JoinLog) }
+        "squad_meta_probe" { return (Test-SquadMetaProbe -HostFile $HostLog -JoinFile $JoinLog) }
         "connect_bootstrap" { return (Test-ConnectBootstrap -HostFile $HostLog -JoinFile $JoinLog) }
         "connect_stream"    { return (Test-ConnectStream    -HostFile $HostLog -JoinFile $JoinLog) }
         "prod_probe"     { return (Test-ProdProbe      -HostFile $HostLog -JoinFile $JoinLog) }
@@ -480,7 +481,7 @@ Export-ModuleMember -Function @(
     "Get-SpawnHands", "Test-SpawnProbe", "Test-SpawnSync", "Test-SpawnFarBind",
     "Test-NpcCensus",
     "Get-WalletSeries", "Get-PoolSeries", "Test-ShopProbe", "Test-WalletProbe",
-    "Test-MoneySync", "Test-MoneyPersist", "Test-VendorTrade",
+    "Test-MoneySync", "Test-MoneyPersist", "Test-SquadMetaProbe", "Test-VendorTrade",
     "Test-RecruitProbe", "Test-RecruitSync", "Test-RecruitCtl", "Test-RecruitAuthority", "Test-OwnTabReturn",
     "Get-FacRelSeries", "Test-FactionProbe", "Test-FactionSync",
     "Get-GTimeSeries", "Test-TimeProbe", "Test-TimeSync", "Get-SlewSummary",

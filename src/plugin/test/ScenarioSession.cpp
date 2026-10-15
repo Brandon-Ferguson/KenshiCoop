@@ -1,6 +1,6 @@
 // ScenarioSession.cpp - session lifecycle scenarios (monolith split from
 // Scenario.cpp, 2026-07-12): latejoin_probe/latejoin_sync, save_probe,
-// save_sync/save_stage1, resume_check, load_probe, load_sync, money_persist. Classes are
+// save_sync/save_stage1, resume_check, load_probe, load_sync, money_persist, squad_meta_probe. Classes are
 // TU-private (anonymous namespace); only makeSessionScenario
 // (ScenarioSupport.h) is exported.
 // Must NOT: change any SCENARIO log string (oracle API, resources/CODE_MAP.md).
@@ -1338,6 +1338,328 @@ private:
 };
 const char* const MoneyPersistScenario::SAVE_NAME = "coopresume";
 
+// squad_meta_probe (Bug #1 step 1, probe tier; loadSync + saveSync ON; no
+// protocol change). Reports, rather than gates, the four open questions in
+// docs/design/bug1-squad-meta.md before any channel is written:
+//   Q1 identity  - SMTAB lines on BOTH sides list every squad tab's container
+//                  (c,cs), leader hand and name; diff them across the two logs.
+//   Q2 persist   - the host renames its OWN tab (t=6s) and the faction (t=14s),
+//                  then save -> ACK -> load; phase=post shows whether a plain
+//                  setName reaches the save.
+//   Q3 permajobs - the join round-trips its own leader's permajob list (read,
+//                  clear, re-add in order, read back: SMJOBROUND) and appends
+//                  JOB_MEDIC through OrdersReceiver::addJob (SMWRITE kind=jobadd
+//                  before/after counts say whether addJob appends at all).
+//   Q4 puppets   - the host appends JOB_MEDIC to the JOIN's tab leader (an
+//                  AI-suppressed puppet here) and samples its current task and
+//                  permajob count at 1 Hz (SMPUPPET) for 10 s.
+// The join also renames its own tab and the faction (t=6s) - the Bug #1
+// symptom itself: phase=mid shows whether the host ever saw those values,
+// phase=post whether the reload wiped them. Passes when every step ran; the
+// answers are in the lines, not in the verdict.
+class SquadMetaProbeScenario : public TimedScenario {
+public:
+    SquadMetaProbeScenario()
+        : TimedScenario("squad_meta_probe", /*evidenceMs=*/0),
+          preDone_(false), writeDone_(false), midDone_(false),
+          hostFacDone_(false), writesOk_(false), puppetSamples_(0),
+          lastPuppetMs_(0), saveIssued_(false), saveOk_(false),
+          ackSeen_(false), ackOk_(false), loadIssued_(false), loadOk_(false),
+          sigWas2_(false), swapDone_(false), postDone_(false),
+          dropStartMs_(0), sigClearedMs_(0), checkAtMs_(0), lastStatusMs_(0) {}
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        smLog("SCENARIO SMSTART host=%d", ctx.isHost ? 1 : 0);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        bool live = engine::gameplayLive(ctx.gw);
+        const char* who = ctx.isHost ? "host" : "join";
+        const unsigned int ownRank  = ctx.isHost ? 0u : 1u;
+        const unsigned int peerRank = ctx.isHost ? 1u : 0u;
+
+        if (!preDone_ && live && ctx.elapsedMs >= CENSUS_PRE_MS) {
+            preDone_ = true;
+            census(ctx, "pre");
+        }
+
+        // ---- Writes: each side changes only what the probe question needs ----
+        if (preDone_ && !writeDone_ && live && ctx.elapsedMs >= WRITE_AT_MS) {
+            writeDone_ = true;
+            Character* own = tabLeader(ctx, ownRank);
+            bool okName = false, okFac = true;
+            if (own) {
+                okName = writeSquadName(own, ctx.isHost ? "SMProbe Host Squad"
+                                                        : "SMProbe Join Squad", who);
+                if (!ctx.isHost) {
+                    okFac = writeFaction(ctx, "SMProbe Join Faction", who);
+                    jobRoundTrip(own, who);
+                }
+                // Whether addJob appends is a FINDING (Q3), not a step that
+                // must succeed, so it does not feed writesOk_.
+                addMedic(own, "own", who);
+            }
+            if (ctx.isHost) {
+                Character* puppet = tabLeader(ctx, peerRank);
+                if (puppet) addMedic(puppet, "puppet", who);
+                else smLog("SCENARIO SMWRITE kind=jobadd target=puppet ok=0 "
+                           "why=no-peer-tab who=%s", who);
+            }
+            writesOk_ = (own != 0) && okName && okFac;
+            if (!own)
+                smLog("SCENARIO SMWRITE kind=all ok=0 why=no-own-tab rank=%u who=%s",
+                      ownRank, who);
+        }
+
+        // Q4: does a permajob wake an AI-suppressed puppet on the host?
+        if (ctx.isHost && writeDone_ && puppetSamples_ < PUPPET_SAMPLES &&
+            ctx.elapsedMs - lastPuppetMs_ >= 1000) {
+            lastPuppetMs_ = ctx.elapsedMs;
+            ++puppetSamples_;
+            Character* puppet = tabLeader(ctx, peerRank);
+            engine::PermajobRead jr[1];
+            int n = puppet ? engine::readPermajobs(puppet, jr, 0) : -1;
+            smLog("SCENARIO SMPUPPET i=%u task=%d jobs=%d t=%lu", puppetSamples_,
+                  puppet ? engine::readTaskKey(puppet) : -2, n, ctx.elapsedMs);
+        }
+
+        if (writeDone_ && !midDone_ && live && ctx.elapsedMs >= CENSUS_MID_MS) {
+            midDone_ = true;
+            census(ctx, "mid");
+        }
+
+        // ---- Host: own faction write, then the coordinated save + load -------
+        if (ctx.isHost) {
+            if (midDone_ && !hostFacDone_ && live && ctx.elapsedMs >= HOST_FAC_MS) {
+                hostFacDone_ = true;
+                writesOk_ = writeFaction(ctx, "SMProbe Host Faction", who) && writesOk_;
+            }
+            if (hostFacDone_ && !saveIssued_ && live && ctx.elapsedMs >= SAVE_AT_MS) {
+                saveIssued_ = true;
+                saveOk_ = engine::saveGameAs(SAVE_NAME);
+                smLog("SCENARIO SMSAVE name='%s' ok=%d t=%lu", SAVE_NAME,
+                      saveOk_ ? 1 : 0, ctx.elapsedMs);
+            }
+            if (saveIssued_ && !ackSeen_ && savexfer::lastAckXferId() != 0) {
+                ackSeen_ = true;
+                ackOk_ = (savexfer::lastAckOk() == 1);
+                smLog("SCENARIO SMACK ok=%d t=%lu", ackOk_ ? 1 : 0, ctx.elapsedMs);
+            }
+            if (ackSeen_ && ackOk_ && !loadIssued_ && live) {
+                loadIssued_ = true;
+                loadOk_ = engine::loadSave(SAVE_NAME);
+                smLog("SCENARIO SMLOAD name='%s' ok=%d t=%lu", SAVE_NAME,
+                      loadOk_ ? 1 : 0, ctx.elapsedMs);
+            }
+        }
+
+        // ---- Both: world-swap detection (same as money_persist) --------------
+        if (!live && dropStartMs_ == 0) {
+            dropStartMs_ = ctx.elapsedMs;
+        } else if (live && dropStartMs_ != 0) {
+            unsigned long ms = ctx.elapsedMs - dropStartMs_;
+            dropStartMs_ = 0;
+            if (ms >= SWAP_MIN_MS && !swapDone_) {
+                swapDone_ = true;
+                checkAtMs_ = ctx.elapsedMs + SETTLE_MS;
+                smLog("SCENARIO SMSWAPDONE swapMs=%lu t=%lu", ms, ctx.elapsedMs);
+            }
+        }
+        {
+            int sig = engine::saveMgrSignal(0);
+            if (sig == 2) { sigWas2_ = true; sigClearedMs_ = 0; }
+            else if (sigWas2_ && sigClearedMs_ == 0) sigClearedMs_ = ctx.elapsedMs;
+            if (!swapDone_ && sigWas2_ && sigClearedMs_ != 0 && live &&
+                dropStartMs_ == 0 &&
+                ctx.elapsedMs >= sigClearedMs_ + SYNC_CONFIRM_MS) {
+                swapDone_ = true;
+                checkAtMs_ = ctx.elapsedMs + SETTLE_MS;
+                smLog("SCENARIO SMSWAPDONE t=%lu (synchronous inside execute)",
+                      ctx.elapsedMs);
+            }
+        }
+
+        if (swapDone_ && !postDone_ && live && ctx.elapsedMs >= checkAtMs_) {
+            postDone_ = true;
+            census(ctx, "post");
+        }
+
+        if (ctx.elapsedMs - lastStatusMs_ >= 5000) {
+            lastStatusMs_ = ctx.elapsedMs;
+            smLog("SCENARIO SMSTATE pre=%d write=%d mid=%d save=%d ack=%d load=%d "
+                  "swap=%d post=%d live=%d t=%lu", preDone_ ? 1 : 0,
+                  writesOk_ ? 1 : 0, midDone_ ? 1 : 0, saveOk_ ? 1 : 0,
+                  ackOk_ ? 1 : 0, loadOk_ ? 1 : 0, swapDone_ ? 1 : 0,
+                  postDone_ ? 1 : 0, live ? 1 : 0, ctx.elapsedMs);
+        }
+
+        bool localDone = ctx.isHost
+            ? (saveOk_ && ackOk_ && loadOk_ && postDone_)
+            : (writeDone_ && postDone_);
+        if ((localDone && ctx.elapsedMs >= checkAtMs_ + TAIL_HOLD_MS) ||
+            ctx.elapsedMs >= DURATION_MS) {
+            setPassed(ctx.isHost
+                ? (writesOk_ && midDone_ && saveOk_ && ackOk_ && loadOk_ &&
+                   swapDone_ && postDone_)
+                : (writesOk_ && midDone_ && swapDone_ && postDone_));
+            return true;
+        }
+        return false;
+    }
+
+private:
+    static void smLog(const char* fmt, ...) {
+        char b[320];
+        va_list ap;
+        va_start(ap, fmt);
+        _vsnprintf(b, sizeof(b) - 1, fmt, ap);
+        va_end(ap);
+        b[sizeof(b) - 1] = '\0';
+        coop::logLine(b);
+    }
+
+    // Leader of squad tab 'rank' (the replicator's ownership ranks), or 0.
+    static Character* tabLeader(const ScenarioContext& ctx, unsigned int rank) {
+        EntityState sq[MAX_SQUAD];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_SQUAD);
+        int idx = tabLeaderIdx(sq, n, rank);
+        if (idx < 0) return 0;
+        return engine::resolve(sq[idx]);
+    }
+
+    // One SMTAB per squad tab, one SMJOBS per tab leader, one SMFACTION.
+    static void census(const ScenarioContext& ctx, const char* phase) {
+        const char* who = ctx.isHost ? "host" : "join";
+        const unsigned int ownRank = ctx.isHost ? 0u : 1u;
+        EntityState sq[MAX_SQUAD];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_SQUAD);
+        for (unsigned int rank = 0; rank < MAX_TABS; ++rank) {
+            int idx = tabLeaderIdx(sq, n, rank);
+            if (idx < 0) break;
+            const EntityState& e = sq[idx];
+            Character* c = engine::resolve(e);
+            char nm[72];
+            bool ok = c && engine::squadNameOf(c, nm, sizeof(nm));
+            if (!ok) nm[0] = '\0';
+            smLog("SCENARIO SMTAB phase=%s rank=%u ctnr=%u,%u leader=%u,%u "
+                  "name='%s' ok=%d owner=%s who=%s", phase, rank,
+                  e.hContainer, e.hContainerSerial, e.hIndex, e.hSerial, nm,
+                  ok ? 1 : 0, rank == ownRank ? "self" : "peer", who);
+            logJobs(c, phase, rank, who);
+        }
+        char fac[72];
+        bool fok = engine::playerFactionName(ctx.gw, fac, sizeof(fac));
+        smLog("SCENARIO SMFACTION phase=%s name='%s' ok=%d who=%s", phase,
+              fok ? fac : "", fok ? 1 : 0, who);
+    }
+
+    static void logJobs(Character* c, const char* phase, unsigned int rank,
+                        const char* who) {
+        engine::PermajobRead jr[MAX_JOBS];
+        int n = c ? engine::readPermajobs(c, jr, MAX_JOBS) : -1;
+        char list[200]; list[0] = '\0';
+        size_t used = 0;
+        for (int i = 0; i < n && i < (int)MAX_JOBS; ++i) {
+            int w = _snprintf(list + used, sizeof(list) - 1 - used, "%s%d@%u,%u",
+                              i ? ";" : "", jr[i].type, jr[i].subj[3], jr[i].subj[4]);
+            if (w < 0) break;
+            used += (size_t)w;
+        }
+        list[sizeof(list) - 1] = '\0';
+        smLog("SCENARIO SMJOBS phase=%s rank=%u n=%d jobs=[%s] who=%s", phase,
+              rank, n, list, who);
+    }
+
+    static bool writeSquadName(Character* c, const char* name, const char* who) {
+        bool ok = engine::setSquadNameOf(c, name);
+        char rb[72];
+        engine::squadNameOf(c, rb, sizeof(rb));
+        ok = ok && strcmp(rb, name) == 0;
+        smLog("SCENARIO SMWRITE kind=squad name='%s' readback='%s' ok=%d who=%s",
+              name, rb, ok ? 1 : 0, who);
+        return ok;
+    }
+
+    static bool writeFaction(const ScenarioContext& ctx, const char* name,
+                             const char* who) {
+        bool ok = engine::setPlayerFactionName(ctx.gw, name);
+        char rb[72];
+        engine::playerFactionName(ctx.gw, rb, sizeof(rb));
+        ok = ok && strcmp(rb, name) == 0;
+        smLog("SCENARIO SMWRITE kind=faction name='%s' readback='%s' ok=%d who=%s",
+              name, rb, ok ? 1 : 0, who);
+        return ok;
+    }
+
+    // Q3: append JOB_MEDIC (needs no subject) and report the count delta.
+    static bool addMedic(Character* c, const char* target, const char* who) {
+        engine::PermajobRead jr[MAX_JOBS];
+        int before = engine::readPermajobs(c, jr, MAX_JOBS);
+        bool ok = engine::addPermajob(c, (int)JOB_MEDIC, 0, 0.0f, 0.0f, 0.0f);
+        int after = engine::readPermajobs(c, jr, MAX_JOBS);
+        int last = (after > 0 && after <= (int)MAX_JOBS) ? jr[after - 1].type : -1;
+        bool appended = ok && before >= 0 && after == before + 1 &&
+                        last == (int)JOB_MEDIC;
+        smLog("SCENARIO SMWRITE kind=jobadd target=%s type=%d before=%d after=%d "
+              "last=%d call=%d ok=%d who=%s", target, (int)JOB_MEDIC, before, after,
+              last, ok ? 1 : 0, appended ? 1 : 0, who);
+        return appended;
+    }
+
+    // Q3: does clear + re-add in list order reproduce the same list?
+    static void jobRoundTrip(Character* c, const char* who) {
+        engine::PermajobRead orig[MAX_JOBS], back[MAX_JOBS];
+        int n = engine::readPermajobs(c, orig, MAX_JOBS);
+        if (n <= 0 || n > (int)MAX_JOBS) {
+            smLog("SCENARIO SMJOBROUND n=%d skipped=1 who=%s", n, who);
+            return;
+        }
+        bool cleared = engine::clearPermajobs(c);
+        int afterClear = engine::readPermajobs(c, back, MAX_JOBS);
+        for (int i = 0; i < n; ++i)
+            engine::addPermajob(c, orig[i].type, orig[i].subj,
+                                orig[i].x, orig[i].y, orig[i].z);
+        int m = engine::readPermajobs(c, back, MAX_JOBS);
+        int firstDiff = -1;
+        for (int i = 0; i < n && i < m; ++i) {
+            if (back[i].type != orig[i].type ||
+                memcmp(back[i].subj, orig[i].subj, sizeof(orig[i].subj)) != 0) {
+                firstDiff = i;
+                break;
+            }
+        }
+        bool same = (m == n) && firstDiff < 0;
+        smLog("SCENARIO SMJOBROUND n=%d cleared=%d afterClear=%d readded=%d "
+              "firstDiff=%d ok=%d who=%s", n, cleared ? 1 : 0, afterClear, m,
+              firstDiff, same ? 1 : 0, who);
+    }
+
+    static const unsigned int  MAX_SQUAD        = 32;
+    static const unsigned int  MAX_TABS         = 8;
+    static const unsigned int  MAX_JOBS         = 16;
+    static const unsigned int  PUPPET_SAMPLES   = 10;
+    static const unsigned long CENSUS_PRE_MS    = 3000;
+    static const unsigned long WRITE_AT_MS      = 6000;
+    static const unsigned long CENSUS_MID_MS    = 12000;
+    static const unsigned long HOST_FAC_MS      = 14000;
+    static const unsigned long SAVE_AT_MS       = 18000;
+    static const unsigned long SWAP_MIN_MS      = 400;
+    static const unsigned long SYNC_CONFIRM_MS  = 3000;
+    static const unsigned long SETTLE_MS        = 5000;
+    static const unsigned long TAIL_HOLD_MS     = 8000;
+    static const unsigned long DURATION_MS      = 110000;
+
+    bool          preDone_, writeDone_, midDone_, hostFacDone_, writesOk_;
+    unsigned int  puppetSamples_;
+    unsigned long lastPuppetMs_;
+    bool          saveIssued_, saveOk_, ackSeen_, ackOk_;
+    bool          loadIssued_, loadOk_, sigWas2_, swapDone_, postDone_;
+    unsigned long dropStartMs_, sigClearedMs_, checkAtMs_, lastStatusMs_;
+
+    static const char* const SAVE_NAME;
+};
+const char* const SquadMetaProbeScenario::SAVE_NAME = "coopresume";
+
 } // namespace
 
 Scenario* makeSessionScenario(const std::string& name) {
@@ -1350,6 +1672,7 @@ Scenario* makeSessionScenario(const std::string& name) {
     if (name == "load_probe")     return new LoadProbeScenario();
     if (name == "load_sync")      return new LoadSyncScenario();
     if (name == "money_persist")  return new MoneyPersistScenario();
+    if (name == "squad_meta_probe") return new SquadMetaProbeScenario();
     return 0;
 }
 

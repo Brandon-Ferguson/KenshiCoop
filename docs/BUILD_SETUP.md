@@ -44,7 +44,8 @@ of dependency `latest`. External libraries remain outside the mod ZIP; the
 patches and v100 compatibility headers are tracked in this repository.
 
 `kenshilib-v100.patch` records the existing v100 header compatibility fixes:
-a shared enum guard, a complete `CraftingItem` placeholder for a by-value
+shared enum guards (`BuildingDesignation`; `taskPriority`, which both
+`Tasker.h` and `AI/AITaskSystem.h` define), a complete `CraftingItem` placeholder for a by-value
 container declaration, and parent-relative includes in
 `kenshi/combat/CombatClass.h` (KenshiLib 0.4.0 moved it into `combat/` without
 updating its `"Enums.h"`/`"util/..."` includes). The placeholder is not a recovered native ABI layout;

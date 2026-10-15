@@ -12,6 +12,7 @@
 // the API consumed by the PowerShell oracles (see resources/CODE_MAP.md).
 
 #include "EngineInternal.h"
+#include <kenshi/AI/AITaskSystem.h> // OrdersReceiver permajobs (Bug #1 probe)
 #include <cstring>
 
 namespace coop {
@@ -1080,6 +1081,141 @@ void charSetName(Character* c, const char* name) {
     __try {
         charSetNameCopy(c, name);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// ---- Bug #1: squad / faction names, permanent jobs --------------------------
+// Same split as charName/charSetName: the std::string work lives in a callee,
+// the SEH guard only holds POD locals (C2712).
+namespace {
+bool squadNameCopy(Character* c, char* out, unsigned int cap) {
+    ActivePlatoon* ap = g_getPlatoonFn(c);
+    if (!ap) return false;
+    const std::string& nm = ap->getName();
+    strncpy(out, nm.c_str(), cap - 1);
+    out[cap - 1] = '\0';
+    return true;
+}
+bool setSquadNameCopy(Character* c, const char* name) {
+    ActivePlatoon* ap = g_getPlatoonFn(c);
+    if (!ap) return false;
+    ap->setName(std::string(name));
+    return true;
+}
+bool factionNameCopy(GameWorld* gw, char* out, unsigned int cap) {
+    Faction* f = gw->player ? gw->player->getFaction() : 0;
+    if (!f) return false;
+    const std::string& nm = f->getName();
+    strncpy(out, nm.c_str(), cap - 1);
+    out[cap - 1] = '\0';
+    return true;
+}
+bool setFactionNameCopy(GameWorld* gw, const char* name) {
+    Faction* f = gw->player ? gw->player->getFaction() : 0;
+    if (!f) return false;
+    f->setName(std::string(name));
+    return true;
+}
+bool addPermajobCall(OrdersReceiver* o, int type, const unsigned int subj[5],
+                     float x, float y, float z) {
+    hand h;
+    if (subj)
+        h = hand(subj[3], subj[4], (itemType)subj[0], subj[1], subj[2]);
+    o->addJob((TaskType)type, h, Ogre::Vector3(x, y, z), /*shift=*/true);
+    return true;
+}
+} // namespace
+
+bool squadNameOf(Character* c, char* out, unsigned int cap) {
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
+    if (!c || !g_getPlatoonFn) return false;
+    __try {
+        return squadNameCopy(c, out, cap);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out[0] = '\0';
+        return false;
+    }
+}
+
+bool setSquadNameOf(Character* c, const char* name) {
+    if (!c || !name || !g_getPlatoonFn) return false;
+    __try {
+        return setSquadNameCopy(c, name);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool playerFactionName(GameWorld* gw, char* out, unsigned int cap) {
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
+    if (!gw) return false;
+    __try {
+        return factionNameCopy(gw, out, cap);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out[0] = '\0';
+        return false;
+    }
+}
+
+bool setPlayerFactionName(GameWorld* gw, const char* name) {
+    if (!gw || !name) return false;
+    __try {
+        return setFactionNameCopy(gw, name);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+int readPermajobs(Character* c, PermajobRead* out, unsigned int maxOut) {
+    if (!c) return -1;
+    __try {
+        OrdersReceiver* o = c->getOrdersReciever();
+        if (!o) return -1;
+        int n = o->getPermajobCount();
+        if (n < 0) return -1;
+        for (int i = 0; i < n && out && (unsigned int)i < maxOut; ++i) {
+            PermajobRead& r = out[i];
+            memset(&r, 0, sizeof(r));
+            r.type = (int)o->getPermajob(i);
+            const Tasker* t = o->getPermajobData(i);
+            if (t) {
+                r.subj[0] = (unsigned int)t->subject.type;
+                r.subj[1] = t->subject.container;
+                r.subj[2] = t->subject.containerSerial;
+                r.subj[3] = t->subject.index;
+                r.subj[4] = t->subject.serial;
+                r.x = t->location.x; r.y = t->location.y; r.z = t->location.z;
+            }
+        }
+        return n;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+bool addPermajob(Character* c, int type, const unsigned int subj[5],
+                 float x, float y, float z) {
+    if (!c) return false;
+    __try {
+        OrdersReceiver* o = c->getOrdersReciever();
+        if (!o) return false;
+        return addPermajobCall(o, type, subj, x, y, z);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool clearPermajobs(Character* c) {
+    if (!c) return false;
+    __try {
+        OrdersReceiver* o = c->getOrdersReciever();
+        if (!o) return false;
+        o->clearPermajobs();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 // The debug marker HUD labels (markerColour/markerCreateSeh/markerUpdateSeh/

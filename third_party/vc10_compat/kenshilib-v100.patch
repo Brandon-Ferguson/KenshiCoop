@@ -1,3 +1,24 @@
+diff --git a/KenshiLib/Include/kenshi/AI/AITaskSystem.h b/KenshiLib/Include/kenshi/AI/AITaskSystem.h
+index c883b13..a0da654 100644
+--- a/KenshiLib/Include/kenshi/AI/AITaskSystem.h
++++ b/KenshiLib/Include/kenshi/AI/AITaskSystem.h
+@@ -84,6 +84,8 @@ public:
+ };
+ 
+ // TODO move?
++#ifndef KENSHILIB_TASK_PRIORITY
++#define KENSHILIB_TASK_PRIORITY
+ enum taskPriority
+ {
+     TP_JUST_ACTION,
+@@ -93,6 +95,7 @@ enum taskPriority
+     TP_OBEDIENCE,
+     TP_MAX_SIZE
+ };
++#endif
+ 
+ class OrdersReceiver : public Ogre::GeneralAllocatedObject
+ {
 diff --git a/KenshiLib/Include/kenshi/Building/Building.h b/KenshiLib/Include/kenshi/Building/Building.h
 index fd1087f..01c8e9b 100644
 --- a/KenshiLib/Include/kenshi/Building/Building.h
@@ -60,6 +81,27 @@ index 75eaa5f..e7a1311 100644
  
  enum BuildingFunction;
  
+diff --git a/KenshiLib/Include/kenshi/Tasker.h b/KenshiLib/Include/kenshi/Tasker.h
+index 584a3a6..8e5623f 100644
+--- a/KenshiLib/Include/kenshi/Tasker.h
++++ b/KenshiLib/Include/kenshi/Tasker.h
+@@ -8,6 +8,8 @@ class CharBody;
+ class AI;
+ 
+ // TODO move?
++#ifndef KENSHILIB_TASK_PRIORITY
++#define KENSHILIB_TASK_PRIORITY
+ enum taskPriority
+ {
+     TP_JUST_ACTION,
+@@ -17,6 +19,7 @@ enum taskPriority
+     TP_OBEDIENCE,
+     TP_MAX_SIZE
+ };
++#endif
+ 
+ // TODO move?
+ class TaskStateData
 diff --git a/KenshiLib/Include/kenshi/combat/CombatClass.h b/KenshiLib/Include/kenshi/combat/CombatClass.h
 index ef7cf2b..04be12f 100644
 --- a/KenshiLib/Include/kenshi/combat/CombatClass.h
