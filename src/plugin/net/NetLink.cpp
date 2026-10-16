@@ -419,6 +419,10 @@ void NetLink::queueDeed(const DeedPacket& pkt) { pushLocked(outCs_, outDeed_, pk
 
 void NetLink::queueSquadName(const SquadNamePacket& pkt) { pushLocked(outCs_, outSquadName_, pkt); }
 
+void NetLink::queueFactionRename(const FactionRenamePacket& pkt) { pushLocked(outCs_, outFactionRename_, pkt); }
+
+void NetLink::queueFactionName(const FactionNamePacket& pkt) { pushLocked(outCs_, outFactionName_, pkt); }
+
 void NetLink::queueFixture(const FixturePacket& pkt) { pushLocked(outCs_, outFixture_, pkt); }
 
 
@@ -515,6 +519,7 @@ bool NetLink::shouldRelayType(u8 type) {
         case PKT_LOAD_REQ:
         case PKT_LOAD_NACK:
         case PKT_MONEY_DELTA:
+        case PKT_FACTION_RENAME: // the host folds it; other joins get PKT_FACTION_NAME
         case PKT_SPAWN_REQ:
         case PKT_COMBAT_HIT:
         case PKT_SPEED_REQ:
@@ -1271,6 +1276,21 @@ void NetLink::threadLoop() {
                         if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &snp)
                             && inbound_) {
                             inbound_->pushSquadName(snp.ownerId, snp);
+                        }
+                    } else if (isHost_ && type == PKT_FACTION_RENAME) {
+                        // Reliable faction-rename event (protocol 72, join ->
+                        // host). Ordered delivery makes the fold exactly-once.
+                        FactionRenamePacket frp;
+                        if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &frp)
+                            && inbound_) {
+                            inbound_->pushFactionRename(frp.ownerId, frp);
+                        }
+                    } else if (!isHost_ && type == PKT_FACTION_NAME) {
+                        // Authoritative faction name + acks (protocol 72, host -> all).
+                        FactionNamePacket fnp;
+                        if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &fnp)
+                            && inbound_) {
+                            inbound_->pushFactionName(fnp.ownerId, fnp);
                         }
                     } else if (!isHost_ && type == PKT_PLAYER_ROSTER) {
                         // The player roster (protocol 56), host -> everyone. This
@@ -2222,6 +2242,35 @@ void NetLink::threadLoop() {
                 enet_host_broadcast(enetHost_, CH_RELIABLE, out);
             } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
                 enet_peer_send(serverPeer_, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+
+        // Drain + send faction-name rows on CH_RELIABLE (protocol 72). Renames
+        // are join -> host events, names are the host's broadcast; the
+        // Replicator only queues each on its own role, and the receiver checks
+        // the role again.
+        std::vector<FactionRenamePacket> factionRenamePkts;
+        std::vector<FactionNamePacket>   factionNamePkts;
+        EnterCriticalSection(&outCs_);
+        factionRenamePkts.swap(outFactionRename_);
+        factionNamePkts.swap(outFactionName_);
+        LeaveCriticalSection(&outCs_);
+        for (size_t i = 0; i < factionRenamePkts.size(); ++i) {
+            ENetPacket* out = enet_packet_create(&factionRenamePkts[i], sizeof(FactionRenamePacket),
+                                                 ENET_PACKET_FLAG_RELIABLE);
+            if (!isHost_ && serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+                enet_peer_send(serverPeer_, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+        for (size_t i = 0; i < factionNamePkts.size(); ++i) {
+            ENetPacket* out = enet_packet_create(&factionNamePkts[i], sizeof(FactionNamePacket),
+                                                 ENET_PACKET_FLAG_RELIABLE);
+            if (isHost_) {
+                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
             } else {
                 enet_packet_destroy(out);
             }

@@ -236,6 +236,12 @@ public:
     // (each client publishes the tabs it owns); sent on change + safety-resent
     // by the caller.
     void queueSquadName(const SquadNamePacket& pkt);
+    // MAIN thread, JOIN: queue a reliable faction-rename event for the host
+    // (protocol 72). Ordered + reliable: the host acks each seq exactly once.
+    void queueFactionRename(const FactionRenamePacket& pkt);
+    // MAIN thread, HOST: queue the authoritative faction name + acks (protocol
+    // 72), broadcast to every join. Sent on change/fold + safety-resent.
+    void queueFactionName(const FactionNamePacket& pkt);
     // MAIN thread: queue a reliable runtime-fixture identity row (protocol 55).
     // Symmetric and static (a fixture's position/template never change), so this
     // is first-sight plus a slow safety resend and idles at zero traffic.
@@ -423,6 +429,10 @@ private:
     std::vector<DeedPacket>      outDeed_;
     // Reliable squad-tab name rows (protocol 72). Guarded by outCs_.
     std::vector<SquadNamePacket> outSquadName_;
+    // Faction-name rows (protocol 72): join rename events / host totals.
+    // Guarded by outCs_.
+    std::vector<FactionRenamePacket> outFactionRename_;
+    std::vector<FactionNamePacket>   outFactionName_;
     // Reliable runtime-fixture identity rows (protocol 55). Guarded by outCs_.
     std::vector<FixturePacket>   outFixture_;
     std::vector<BuildPlacePacket> outBuildPlace_;

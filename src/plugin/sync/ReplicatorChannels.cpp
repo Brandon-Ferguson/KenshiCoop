@@ -1580,6 +1580,162 @@ void Replicator::applySquadNames(const SyncContext& ctx) {
     }
 }
 
+// ---- Protocol 72: player faction name (Bug #1 step 3) -----------------------
+// See the FactionRenamePacket / FactionNamePacket comment in Wire.h. Every write
+// goes through engine::writePlayerFactionName (both the displayed and the saved
+// field) and moves facNameSeen_ with it, so the sampler never mistakes a name
+// we wrote for a rename the player made.
+
+void Replicator::publishFactionName(const SyncContext& ctx) {
+    GameWorld* gw = ctx.gw; NetLink& net = *ctx.net; u32 ownerId = ctx.localId;
+    if (!squadMetaSync_) return;
+    unsigned long now = nowMs();
+    if (!facNameDirty_ &&
+        !sync::gateSampleDue(now, facNameSampleMs_, tuning_.facNameSampleMs))
+        return;
+    facNameSampleMs_ = now;
+    char cur[sizeof(((FactionNamePacket*)0)->name)];
+    if (!engine::playerFactionName(gw, cur, sizeof(cur)) || !cur[0]) return;
+
+    // First sample of a session: the loaded name is the baseline, not a rename.
+    if (!facNameSeeded_) {
+        facNameSeeded_ = true;
+        facNameSeen_ = cur;
+        if (ctx.isHost) facNameTotal_ = cur;
+        char b[128];
+        _snprintf(b, sizeof(b) - 1, "[facname] SEED name='%s' role=%s", cur,
+                  ctx.isHost ? "host" : "join");
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        if (!ctx.isHost) return;
+    }
+
+    if (ctx.isHost) {
+        if (facNameSeen_ != cur) {
+            // The host player renamed the faction. Make the save field agree,
+            // or the host's own rename would be lost on the next load too.
+            bool ok = engine::writePlayerFactionName(gw, cur);
+            facNameSeen_ = cur;
+            facNameTotal_ = cur;
+            char b[160];
+            _snprintf(b, sizeof(b) - 1, "[facname] LOCAL name='%s' saveField=%d",
+                      cur, ok ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        bool changed = (facNameTotal_ != facNameSent_);
+        if (!sync::gateShouldSend(changed || facNameDirty_, now, facNameSentMs_,
+                                  /*minSendMs*/ 0, tuning_.facNameResendMs,
+                                  /*resendUnsent*/ true))
+            return;
+        facNameSent_ = facNameTotal_; facNameSentMs_ = now; facNameDirty_ = false;
+        FactionNamePacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type    = (u8)PKT_FACTION_NAME;
+        pkt.ownerId = ownerId;
+        pkt.seq     = facNameSeqOut_++;
+        for (u32 i = 0; i < MAX_PLAYERS; ++i) pkt.ackSeq[i] = facNameAck_[i];
+        strncpy(pkt.name, facNameTotal_.c_str(), sizeof(pkt.name) - 1);
+        net.queueFactionName(pkt);
+        if (changed) { // resends and pure acks stay quiet
+            char b[176];
+            _snprintf(b, sizeof(b) - 1,
+                      "[facname] SEND name='%s' seq=%u ack=%u,%u,%u,%u", pkt.name,
+                      pkt.seq, pkt.ackSeq[0], pkt.ackSeq[1], pkt.ackSeq[2], pkt.ackSeq[3]);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        return;
+    }
+
+    // Join: a change we did not write is the player's rename. Report the
+    // EVENT and keep it pending until the host's ack covers it.
+    if (facNameSeen_ == cur) return;
+    bool ok = engine::writePlayerFactionName(gw, cur);
+    facNameSeen_ = cur;
+    facRenamePending_ = ++facRenameSeq_;
+    FactionRenamePacket pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type    = (u8)PKT_FACTION_RENAME;
+    pkt.ownerId = ownerId;
+    pkt.seq     = facRenamePending_;
+    strncpy(pkt.name, cur, sizeof(pkt.name) - 1);
+    net.queueFactionRename(pkt);
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "[facname] RENAME name='%s' seq=%u saveField=%d",
+              pkt.name, pkt.seq, ok ? 1 : 0);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+}
+
+void Replicator::applyFactionName(const SyncContext& ctx) {
+    GameWorld* gw = ctx.gw; Inbound& in = *ctx.in; u32 localId = ctx.localId;
+    std::deque<InboundFactionRename> renames;
+    std::deque<InboundFactionName> names;
+    in.drainFactionRename(renames);
+    in.drainFactionName(names);
+    if (renames.empty() && names.empty()) return;
+    if (!squadMetaSync_) return;
+
+    if (ctx.isHost) {
+        // Fold join renames in arrival order (reliable + ordered per join).
+        for (std::deque<InboundFactionRename>::iterator it = renames.begin();
+             it != renames.end(); ++it) {
+            const FactionRenamePacket& p = it->pkt;
+            if (it->ownerId >= MAX_PLAYERS) continue;
+            if (p.seq <= facNameAck_[it->ownerId]) continue; // already folded
+            facNameAck_[it->ownerId] = p.seq;
+            facNameDirty_ = true; // even a no-op fold must be acked
+            char nm[sizeof(p.name) + 1];
+            memcpy(nm, p.name, sizeof(p.name));
+            nm[sizeof(p.name)] = '\0';
+            if (!nm[0] || facNameTotal_ == nm) continue;
+            std::string was = facNameTotal_;
+            bool ok = engine::writePlayerFactionName(gw, nm);
+            facNameTotal_ = nm;
+            facNameSeen_ = nm; // our own write: not a host-local rename
+            facNameSeeded_ = true;
+            char b[224];
+            _snprintf(b, sizeof(b) - 1,
+                      "[facname] FOLD from=%u seq=%u name='%s' was='%s' ok=%d",
+                      it->ownerId, p.seq, nm, was.c_str(), ok ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        return;
+    }
+
+    // Join: adopt the host's authoritative name unless our rename is in flight.
+    for (std::deque<InboundFactionName>::iterator it = names.begin();
+         it != names.end(); ++it) {
+        const FactionNamePacket& p = it->pkt;
+        if (!sync::gateSeqAccept(facNameSeqSeen_, p.seq)) continue; // stale/dup
+        facNameSeqSeen_ = p.seq;
+        if (facRenamePending_ != 0 && localId < MAX_PLAYERS &&
+            p.ackSeq[localId] >= facRenamePending_) {
+            char b[96];
+            _snprintf(b, sizeof(b) - 1, "[facname] ACK seq=%u", facRenamePending_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            facRenamePending_ = 0;
+        }
+        if (facRenamePending_ != 0) continue; // keep our own name on screen
+        char nm[sizeof(p.name) + 1];
+        memcpy(nm, p.name, sizeof(p.name));
+        nm[sizeof(p.name)] = '\0';
+        if (!nm[0]) continue;
+        char cur[sizeof(p.name) + 1];
+        engine::playerFactionName(gw, cur, sizeof(cur));
+        if (strcmp(cur, nm) == 0) {
+            facNameSeen_ = nm;
+            facNameSeeded_ = true;
+            continue;
+        }
+        bool ok = engine::writePlayerFactionName(gw, nm);
+        facNameSeen_ = nm;
+        facNameSeeded_ = true;
+        char b[224];
+        _snprintf(b, sizeof(b) - 1,
+                  "[facname] ADOPT name='%s' was='%s' ok=%d seq=%u", nm, cur,
+                  ok ? 1 : 0, p.seq);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+}
+
 // ---- Protocol 55: runtime-fixture identity ----------------------------------
 // See the FixturePacket comment in Wire.h for the measurement that motivates
 // this channel (the same mine carrying hand 50.2399902464 on the host and
@@ -2019,7 +2175,10 @@ void Replicator::driveSampledChannels(const SyncContext& ctx) {
         { &Replicator::prodSync_,     0,                     &Replicator::publishProd,       &Replicator::applyProd,       true  },
         { &Replicator::researchSync_, 0,                     &Replicator::publishResearch,   &Replicator::applyResearch,   true  },
         { &Replicator::deedSync_,     0,                     &Replicator::publishDeeds,      &Replicator::applyDeeds,      false },
-        { &Replicator::squadMetaSync_, 0,                    &Replicator::publishSquadNames, &Replicator::applySquadNames, false }
+        { &Replicator::squadMetaSync_, 0,                    &Replicator::publishSquadNames, &Replicator::applySquadNames, false },
+        // Symmetric row: both roles publish (join = rename events, host = the
+        // total) and both apply (host = fold, join = adopt).
+        { &Replicator::squadMetaSync_, 0,                    &Replicator::publishFactionName, &Replicator::applyFactionName, false }
     };
     const int n = (int)(sizeof(kCh) / sizeof(kCh[0]));
     for (int i = 0; i < n; ++i) {
@@ -2123,6 +2282,8 @@ void Replicator::onPeerConnected(NetLink& net, u32 ownerId) {
     for (std::map<TabKey, SquadNameOut>::iterator it = squadNameOut_.begin();
          it != squadNameOut_.end(); ++it)
         if (it->second.lastSendMs != 0) it->second.lastSendMs = 1;
+    // The host's faction-name total: same ageing (one value, like the pool).
+    if (facNameSentMs_ != 0) facNameSentMs_ = 1;
 
     char b[240];
     _snprintf(b, sizeof(b) - 1,

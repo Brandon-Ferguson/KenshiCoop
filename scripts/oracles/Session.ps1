@@ -973,6 +973,9 @@ function Test-SquadMetaProbe2 {
 #   3. the coordinated save/ACK/load round trip ran (SMPSAVE/SMPACK/SMPLOAD ok=1);
 #   4. BOTH sides swapped worlds and read the join's name (SMPPOST ok=1). Coming
 #      back with the pre-rename name is the original bug reproducing.
+# Step 3 runs the same four checks for the FACTION name (SMPFWRITE, SMPFLATCH,
+# SMPFPOST), where the post-load check requires BOTH the displayed field and
+# the saved field (PlayerInterface::factionName) to hold the join's name.
 function Test-SquadMetaPersist {
     param([string]$HostFile, [string]$JoinFile)
     $why = @()
@@ -1017,10 +1020,46 @@ function Test-SquadMetaPersist {
         $why += "the two clients disagree post-load (host '$hostPost', join '$joinPost')"
     }
 
+    # ---- Step 3: the faction name ------------------------------------------
+    $fw = Select-String -Path $JoinFile -Pattern "SCENARIO SMPFWRITE name='([^']*)' readback='([^']*)' ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($null -eq $fw) { $why += "join never logged its SMPFWRITE" }
+    elseif ($fw.Matches[0].Groups[3].Value -ne '1') { $why += "join's local faction rename did not read back ('$($fw.Matches[0].Groups[2].Value)')" }
+
+    $fl = Select-String -Path $HostFile -Pattern "SCENARIO SMPFLATCH seen='([^']*)' expect='([^']*)' start='([^']*)' moved=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    $fexpect = ''
+    if ($null -eq $fl) { $why += "host never latched the faction name (SMPFLATCH)" }
+    else {
+        $g = $fl.Matches[0].Groups
+        $fexpect = $g[2].Value
+        if ($g[4].Value -eq '1') { Write-Host "    FINDING: host saw the faction as '$($g[1].Value)' before the save (the join's rename was folded)" }
+        else { $why += "host still saw faction '$($g[1].Value)' at save time - the join's rename never reached the authority" }
+    }
+
+    $fpostRe = "SCENARIO SMPFPOST member='([^']*)' iface='([^']*)' expect='([^']*)' start='([^']*)' ok=(\d) who=(host|join)"
+    $hostF = ''; $joinF = ''
+    foreach ($side in @(@($HostFile, 'host'), @($JoinFile, 'join'))) {
+        $file = $side[0]; $tag = $side[1]
+        $p = Select-String -Path $file -Pattern $fpostRe -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $p) { $why += "$tag never logged its post-load SMPFPOST"; continue }
+        $g = $p.Matches[0].Groups
+        $member = $g[1].Value; $iface = $g[2].Value; $want = $g[3].Value; $start = $g[4].Value
+        if ($tag -eq 'host') { $hostF = $member } else { $joinF = $member }
+        if ($g[5].Value -ne '1') {
+            $tail = if ($member -eq $start) { " - this is the pre-rename name, the original Bug #1 wipe" }
+                    elseif ($member -eq $want) { " - displayed right but the saved field is wrong, so the NEXT load will lose it" }
+                    else { "" }
+            $why += "$tag faction came back as displayed='$member' saved='$iface', want '$want'$tail"
+        }
+    }
+    if ($hostF -ne '' -and $joinF -ne '' -and $hostF -ne $joinF) {
+        $why += "the two clients disagree on the faction post-load (host '$hostF', join '$joinF')"
+    }
+
     $v = if ($why.Count -eq 0) { "PASS" } else { "FAIL" }
     $detail = $why -join "; "
-    Write-Host "  SQUAD-META-PERSIST $v - expect='$expect' hostPost='$hostPost' joinPost='$joinPost' $detail"
+    Write-Host "  SQUAD-META-PERSIST $v - expect='$expect' hostPost='$hostPost' joinPost='$joinPost' faction expect='$fexpect' host='$hostF' join='$joinF' $detail"
     return (Add-GateResult -Name "squad_meta_persist" -Status $v `
-                -Metrics @{ expect = $expect; hostPost = $hostPost; joinPost = $joinPost } -Detail $detail)
+                -Metrics @{ expect = $expect; hostPost = $hostPost; joinPost = $joinPost;
+                            fexpect = $fexpect; hostFaction = $hostF; joinFaction = $joinF } -Detail $detail)
 }
 

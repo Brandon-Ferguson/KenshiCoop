@@ -578,7 +578,23 @@ public:
     // sender's safety resend retries it.
     void applySquadNames(const SyncContext& ctx);
 
-    // Squad-tab name sync master enable (KENSHICOOP_SQUAD_META).
+    // BEFORE engine (protocol 72, Bug #1 step 3): sample the displayed player
+    // faction name ~1 Hz. A JOIN that sees it change (a local rename) writes
+    // the save field too and sends a PKT_FACTION_RENAME event, keeping it
+    // pending until the host acks it. The HOST treats a local change as its
+    // own rename (also written to the save field) and broadcasts the
+    // authoritative PKT_FACTION_NAME with per-player acks on change, after a
+    // fold, and on a safety resend.
+    void publishFactionName(const SyncContext& ctx);
+
+    // BEFORE engine (protocol 72): HOST folds join rename events in arrival
+    // order (per-join seq guard), writes both name fields and marks the total
+    // for an immediate broadcast; JOIN adopts the host's name (both fields)
+    // unless its own rename is still unacked. Baselines are updated on every
+    // write so an applied name is never re-detected as a local rename.
+    void applyFactionName(const SyncContext& ctx);
+
+    // Squad-tab and faction name sync master enable (KENSHICOOP_SQUAD_META).
     void setSquadMetaSync(bool v) { squadMetaSync_ = v; }
 
     // AFTER engine (protocol 55): announce the container/machine-class fixtures
@@ -2182,6 +2198,20 @@ private:
     u32           squadNameSeqOut_;
     unsigned long squadNameSampleMs_;
     bool          squadMetaSync_;
+    // Protocol 72 player faction name (Bug #1 step 3). Two writers, so the
+    // join sends rename EVENTS and the host owns the total (§16).
+    std::string   facNameSeen_;      // both: last displayed name seen or written
+    bool          facNameSeeded_;    // both: baseline taken this session
+    unsigned long facNameSampleMs_;
+    u32           facRenameSeq_;     // join: monotonic, never reset in-process
+    u32           facRenamePending_; // join: seq of the unacked rename (0 = none)
+    u32           facNameSeqSeen_;   // join: stale guard on host totals
+    std::string   facNameTotal_;     // host: the authoritative name
+    std::string   facNameSent_;      // host: what was last broadcast
+    unsigned long facNameSentMs_;
+    u32           facNameSeqOut_;    // host: monotonic
+    u32           facNameAck_[MAX_PLAYERS]; // host: highest folded seq per player
+    bool          facNameDirty_;     // host: a fold needs an immediate broadcast
     // Protocol 55 runtime-fixture identity. A mine is instantiated per client
     // for a terrain node, so the same physical fixture has a different hand on
     // each side; without a pairing the pose inject resolves nothing (the miner

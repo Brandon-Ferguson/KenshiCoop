@@ -1212,6 +1212,12 @@ bool setPlayerIfaceFactionName(GameWorld* gw, const char* name) {
     }
 }
 
+bool writePlayerFactionName(GameWorld* gw, const char* name) {
+    bool member = setPlayerFactionName(gw, name);
+    bool iface  = setPlayerIfaceFactionName(gw, name);
+    return member && iface;
+}
+
 int readPermajobs(Character* c, PermajobRead* out, unsigned int maxOut) {
     if (!c) return -1;
     __try {

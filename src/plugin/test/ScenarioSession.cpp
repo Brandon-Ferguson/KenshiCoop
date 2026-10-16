@@ -1742,6 +1742,11 @@ const int SquadMetaProbeScenario::ORDER_JOBS[SquadMetaProbeScenario::ORDER_JOB_C
 //     corollary). Then coordinated save -> this save's ACK -> load.
 //   * both, post-swap: tab 1 must read the join's name. Reading the host's old
 //     name instead IS the original bug.
+// Step 3 adds the faction name on the same timeline: the join renames the
+// faction the way the game UI does (Faction::name only - the channel must carry
+// it to the save field), the host latches both names, and post-swap BOTH
+// faction fields must read the join's name on both sides (SMPFWRITE /
+// SMPFLATCH / SMPFPOST).
 class SquadMetaPersistScenario : public TimedScenario {
 public:
     SquadMetaPersistScenario()
@@ -1750,16 +1755,20 @@ public:
           ackBase_(0), saveIssued_(false), saveOk_(false), ackSeen_(false),
           ackOk_(false), loadIssued_(false), loadOk_(false), sigWas2_(false),
           swapDone_(false), checked_(false), postOk_(false),
+          fwriteOk_(false), fmoved_(false), fpostOk_(false),
           lastWatchMs_(0), dropStartMs_(0), sigClearedMs_(0), checkAtMs_(0),
           lastStatusMs_(0) {
         startName_[0] = '\0';
+        startFaction_[0] = '\0';
     }
 
     virtual void onStart(const ScenarioContext& ctx) {
         Character* c = tabLeader(ctx, JOIN_RANK);
         if (!c || !engine::squadNameOf(c, startName_, sizeof(startName_)))
             startName_[0] = '\0';
-        smLog("SCENARIO SMPSTART host=%d tab1='%s'", ctx.isHost ? 1 : 0, startName_);
+        engine::playerFactionName(ctx.gw, startFaction_, sizeof(startFaction_));
+        smLog("SCENARIO SMPSTART host=%d tab1='%s' faction='%s'", ctx.isHost ? 1 : 0,
+              startName_, startFaction_);
     }
 
     virtual bool onTick(const ScenarioContext& ctx) {
@@ -1776,6 +1785,13 @@ public:
             writeOk_ = ok && strcmp(rb, NEW_NAME) == 0;
             smLog("SCENARIO SMPWRITE name='%s' readback='%s' ok=%d t=%lu",
                   NEW_NAME, rb, writeOk_ ? 1 : 0, ctx.elapsedMs);
+            // The UI's rename: the displayed field only.
+            bool fok = engine::setPlayerFactionName(ctx.gw, NEW_FACTION);
+            char frb[72]; frb[0] = '\0';
+            engine::playerFactionName(ctx.gw, frb, sizeof(frb));
+            fwriteOk_ = fok && strcmp(frb, NEW_FACTION) == 0;
+            smLog("SCENARIO SMPFWRITE name='%s' readback='%s' ok=%d t=%lu",
+                  NEW_FACTION, frb, fwriteOk_ ? 1 : 0, ctx.elapsedMs);
         }
 
         // ---- Host: latch what reached it, then save + load ----------------
@@ -1786,13 +1802,20 @@ public:
                 Character* c = tabLeader(ctx, JOIN_RANK);
                 char seen[72]; seen[0] = '\0';
                 if (c) engine::squadNameOf(c, seen, sizeof(seen));
-                bool match = strcmp(seen, NEW_NAME) == 0;
-                if (match || ctx.elapsedMs >= LATCH_DEADLINE_MS) {
+                char fseen[72]; fseen[0] = '\0';
+                engine::playerFactionName(ctx.gw, fseen, sizeof(fseen));
+                bool match  = strcmp(seen, NEW_NAME) == 0;
+                bool fmatch = strcmp(fseen, NEW_FACTION) == 0;
+                if ((match && fmatch) || ctx.elapsedMs >= LATCH_DEADLINE_MS) {
                     latched_ = true;
                     moved_ = match;
+                    fmoved_ = fmatch;
                     smLog("SCENARIO SMPLATCH seen='%s' expect='%s' start='%s' "
                           "moved=%d t=%lu", seen, NEW_NAME, startName_,
                           moved_ ? 1 : 0, ctx.elapsedMs);
+                    smLog("SCENARIO SMPFLATCH seen='%s' expect='%s' start='%s' "
+                          "moved=%d t=%lu", fseen, NEW_FACTION, startFaction_,
+                          fmoved_ ? 1 : 0, ctx.elapsedMs);
                 }
             }
             if (latched_ && !saveIssued_ && live) {
@@ -1852,6 +1875,15 @@ public:
             postOk_ = strcmp(post, NEW_NAME) == 0;
             smLog("SCENARIO SMPPOST name='%s' expect='%s' start='%s' ok=%d who=%s t=%lu",
                   post, NEW_NAME, startName_, postOk_ ? 1 : 0, who, ctx.elapsedMs);
+            // Both faction fields: the displayed one AND the one the next save
+            // will keep.
+            char member[72], iface[72];
+            engine::playerFactionFields(ctx.gw, member, iface, 0, sizeof(member));
+            fpostOk_ = strcmp(member, NEW_FACTION) == 0 &&
+                       strcmp(iface, NEW_FACTION) == 0;
+            smLog("SCENARIO SMPFPOST member='%s' iface='%s' expect='%s' start='%s' "
+                  "ok=%d who=%s t=%lu", member, iface, NEW_FACTION, startFaction_,
+                  fpostOk_ ? 1 : 0, who, ctx.elapsedMs);
         }
 
         if (ctx.elapsedMs - lastStatusMs_ >= 5000) {
@@ -1869,8 +1901,9 @@ public:
         if ((localDone && ctx.elapsedMs >= checkAtMs_ + TAIL_HOLD_MS) ||
             ctx.elapsedMs >= DURATION_MS) {
             setPassed(ctx.isHost
-                ? (moved_ && saveOk_ && ackOk_ && loadOk_ && swapDone_ && postOk_)
-                : (writeOk_ && swapDone_ && postOk_));
+                ? (moved_ && fmoved_ && saveOk_ && ackOk_ && loadOk_ && swapDone_ &&
+                   postOk_ && fpostOk_)
+                : (writeOk_ && fwriteOk_ && swapDone_ && postOk_ && fpostOk_));
             return true;
         }
         return false;
@@ -1887,17 +1920,21 @@ private:
     static const unsigned long DURATION_MS       = 110000;
 
     char          startName_[72];
+    char          startFaction_[72];
     bool          writeDone_, writeOk_, latched_, moved_;
     u32           ackBase_; // lastAckXferId() when our save was issued
     bool          saveIssued_, saveOk_, ackSeen_, ackOk_;
     bool          loadIssued_, loadOk_, sigWas2_, swapDone_, checked_, postOk_;
+    bool          fwriteOk_, fmoved_, fpostOk_; // step 3: faction name
     unsigned long lastWatchMs_, dropStartMs_, sigClearedMs_, checkAtMs_, lastStatusMs_;
 
     static const char* const SAVE_NAME;
     static const char* const NEW_NAME;
+    static const char* const NEW_FACTION;
 };
-const char* const SquadMetaPersistScenario::SAVE_NAME = "coopresume";
-const char* const SquadMetaPersistScenario::NEW_NAME  = "SMPersist Join Squad";
+const char* const SquadMetaPersistScenario::SAVE_NAME   = "coopresume";
+const char* const SquadMetaPersistScenario::NEW_NAME    = "SMPersist Join Squad";
+const char* const SquadMetaPersistScenario::NEW_FACTION = "SMPersist Join Faction";
 
 } // namespace
 

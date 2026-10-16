@@ -21,8 +21,9 @@ typedef float          f32;
 typedef double         f64;
 
 // Protocol version is checked at handshake; a mismatch is rejected (no back-compat).
-// Public 72 adds PKT_SQUAD_NAME (squad-tab names, Bug #1) to 70's complete bag
-// transfers and exact merchant stock/template state.
+// Public 72 adds PKT_SQUAD_NAME and PKT_FACTION_RENAME/PKT_FACTION_NAME (squad
+// and faction names, Bug #1) to 70's complete bag transfers and exact merchant
+// stock/template state.
 #ifdef KENSHICOOP_NET_DIAG
 // Private 73 additionally carries bounded, reliable join-log chunks.
 const u16 PROTOCOL_VERSION = 73;
@@ -106,6 +107,8 @@ enum PacketType {
     PKT_FIXTURE          = 48,// RELIABLE runtime-fixture identity row (protocol 55); FixturePacket
     PKT_PLAYER_ROSTER    = 49, // RELIABLE display-name table (host -> all, protocol 56); RosterPacket
     PKT_SQUAD_NAME       = 50, // RELIABLE owner-published squad-tab name (protocol 72); SquadNamePacket
+    PKT_FACTION_RENAME   = 51, // RELIABLE join faction-rename event (join -> host, protocol 72); FactionRenamePacket
+    PKT_FACTION_NAME     = 52, // RELIABLE authoritative faction name + acks (host -> all, protocol 72); FactionNamePacket
 #ifdef KENSHICOOP_NET_DIAG
     PKT_DEBUG_LOG_FILE   = 250 // private JOIN -> HOST local-log byte stream
 #endif
@@ -1241,6 +1244,33 @@ struct SquadNamePacket {
     u32 container;       // member hand container of the tab
     u32 containerSerial; // member hand containerSerial of the tab
     char name[64];       // NUL-terminated; '' = unreadable, never applied
+};
+
+// ---- Protocol 72: player faction name (Bug #1, step 3) -----------------------
+// ONE shared player faction, TWO writers (any player can rename it), so this
+// replicates the OPERATION, not the value (REPLICATION_PITFALLS §16): a join
+// sends the rename it made as an event; the host folds events in arrival order,
+// writes the result and broadcasts the authoritative name with a per-player
+// ack. A join keeps its own pending rename on screen until an ack covers it, so
+// the name does not bounce back while the event is in flight.
+//
+// Every write - the host's fold, a join adopting the host's name, either side's
+// own local rename - sets BOTH Faction::name (what is displayed) and
+// PlayerInterface::factionName (what the save keeps): squad_meta_probe2 showed
+// the save stores the latter and the load copies it into the former.
+struct FactionRenamePacket {
+    u8  type;            // = PKT_FACTION_RENAME
+    u32 ownerId;         // network player id of the renaming join
+    u32 seq;             // per-join monotonic; the host acks it in FactionNamePacket
+    char name[64];       // NUL-terminated new name
+};
+
+struct FactionNamePacket {
+    u8  type;            // = PKT_FACTION_NAME
+    u32 ownerId;         // the host's network player id
+    u32 seq;             // host monotonic (stale-row guard)
+    u32 ackSeq[MAX_PLAYERS]; // per player id: highest rename seq folded (0 = none)
+    char name[64];       // NUL-terminated authoritative name
 };
 
 #ifdef KENSHICOOP_NET_DIAG

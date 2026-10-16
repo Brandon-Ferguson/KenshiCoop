@@ -334,6 +334,10 @@ bool setPlayerFactionName(GameWorld* gw, const char* name);
 bool playerFactionFields(GameWorld* gw, char* member, char* iface, char* data,
                          unsigned int cap);
 bool setPlayerIfaceFactionName(GameWorld* gw, const char* name);
+// Rename the player faction the way the save will keep it: BOTH Faction::name
+// (displayed now) and PlayerInterface::factionName (saved; the load copies it
+// back into Faction::name). True only if both writes succeeded.
+bool writePlayerFactionName(GameWorld* gw, const char* name);
 // One permanent job (OrdersReceiver permajob slot): engine TaskType, subject
 // hand (readObjectHand layout: type, container, containerSerial, index,
 // serial) and location. A job added with no subject does NOT read back all

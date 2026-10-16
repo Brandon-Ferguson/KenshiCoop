@@ -1,6 +1,6 @@
 # Bug #1 design: joiner squad names, faction name and jobs survive the save
 
-Status: **step 2 (squad names) passes in game; step 3 (faction name) in progress** —
+Status: **step 2 (squad names) passes in game; step 3 (faction name) implemented, not yet run in game** —
 October 16, 2026.
 Bug source: nhoral/KenshiCoop issue #74; docs/PROJECT_BRIEF.md bug table row 1.
 
@@ -201,6 +201,37 @@ Known limits:
   `UNRESOLVED` and keeps retrying. Not yet measured.
 - Whether the squad bar redraws a renamed tab without a reload is not measured.
 
+## Step 3: faction name (implemented, not yet run in game)
+
+- `PKT_FACTION_RENAME` = 51 (73 bytes, join → host, **not relayed**) and
+  `PKT_FACTION_NAME` = 52 (89 bytes, host → all, per-player `ackSeq[4]`).
+  Same protocol 72 / 73 as step 2; the same `KENSHICOOP_SQUAD_META` switch.
+- `Replicator::publishFactionName` / `applyFactionName`, a symmetric row after
+  squad names. Every write goes through `engine::writePlayerFactionName`
+  (both `Faction::name` and `PlayerInterface::factionName`) and moves the
+  `facNameSeen_` baseline with it (the echo guard).
+  - Join: a displayed-name change it did not write is the player's rename →
+    write the saved field too, send `RENAME` (seq), keep it **pending**; host
+    totals are ignored while pending, and the ack (`ackSeq[localId] >= seq`)
+    clears it.
+  - Host: folds renames in arrival order (per-join seq guard), writes both
+    fields, marks the total dirty for an immediate broadcast (a no-op fold is
+    still acked). A host-local rename (the host player in the UI) is written to
+    the saved field too, so the host's own renames also survive.
+  - Totals are resent every 10 s and on the connect edge; the first sample of a
+    session seeds the baseline without reporting a rename.
+- Log lines: `[facname] SEED`, `RENAME` (join), `FOLD` (host, with the old
+  name), `SEND` (host, on change), `ACK` and `ADOPT` (join), `LOCAL` (host).
+- Gate: `squad_meta_persist` now also renames the faction on the join the way
+  the UI does (displayed field only), latches it on the host (`SMPFLATCH`) and
+  requires **both** fields to hold the join's name after reload on both sides
+  (`SMPFPOST`). The oracle names a "displayed right but saved field wrong"
+  result separately, because that one is lost on the NEXT load.
+
+Known limits: a rename within about a second of the host's save can miss that
+save (as for squad names); two renames from different players inside one
+round trip resolve to whichever the host folds last.
+
 ## Steps (branch `fix/squad-meta-persist`, one commit each)
 
 1. **Probe scenario `squad_meta_probe`** — read/write each value on own tabs,
@@ -209,7 +240,7 @@ Known limits:
 1b. **Follow-up probe `squad_meta_probe2`** — which faction field the save
    keeps, and whether clear + re-add preserves the order of 2+ jobs. **Done.**
 2. Squad names end to end + gate (`PKT_SQUAD_NAME`, protocol bump). **Done; gate passes in game.**
-3. Faction rename op channel.
+3. Faction rename op channel (`PKT_FACTION_RENAME` / `PKT_FACTION_NAME`). **Implemented.**
 4. Jobs, including subject translation and parking.
 5. Update docs/PROJECT_BRIEF.md's bug table only after a real two-player session.
 
