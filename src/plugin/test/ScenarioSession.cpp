@@ -1362,6 +1362,22 @@ Character* tabLeader(const ScenarioContext& ctx, unsigned int rank) {
     return engine::resolve(sq[idx]);
 }
 
+// "58,57": a character's permajob TYPES in list order ('' = none / unreadable).
+void jobTypesOf(Character* c, char* out, unsigned int cap) {
+    out[0] = '\0';
+    if (!c) return;
+    const unsigned int MAX_JOBS = 16;
+    engine::PermajobRead jr[MAX_JOBS];
+    int n = engine::readPermajobs(c, jr, MAX_JOBS);
+    size_t used = 0;
+    for (int i = 0; i < n && i < (int)MAX_JOBS; ++i) {
+        int w = _snprintf(out + used, cap - 1 - used, "%s%d", i ? "," : "", jr[i].type);
+        if (w < 0) break;
+        used += (size_t)w;
+    }
+    out[cap - 1] = '\0';
+}
+
 // squad_meta_probe (Bug #1 step 1, probe tier; loadSync + saveSync ON; no
 // protocol change). Reports, rather than gates, the four open questions in
 // docs/design/bug1-squad-meta.md before any channel is written:
@@ -1747,6 +1763,11 @@ const int SquadMetaProbeScenario::ORDER_JOBS[SquadMetaProbeScenario::ORDER_JOB_C
 // it to the save field), the host latches both names, and post-swap BOTH
 // faction fields must read the join's name on both sides (SMPFWRITE /
 // SMPFLATCH / SMPFPOST).
+// Step 4 adds the join tab leader's permanent jobs: the join clears them and
+// adds JOB_MEDIC then JOB_REPAIR_ROBOT (both accept no subject -
+// squad_meta_probe2), the host latches its copy's job types, and post-swap the
+// leader must read "58,57" in that order on both sides (SMPJWRITE / SMPJLATCH
+// / SMPJPOST).
 class SquadMetaPersistScenario : public TimedScenario {
 public:
     SquadMetaPersistScenario()
@@ -1756,10 +1777,15 @@ public:
           ackOk_(false), loadIssued_(false), loadOk_(false), sigWas2_(false),
           swapDone_(false), checked_(false), postOk_(false),
           fwriteOk_(false), fmoved_(false), fpostOk_(false),
+          jwriteOk_(false), jmoved_(false), jpostOk_(false),
           lastWatchMs_(0), dropStartMs_(0), sigClearedMs_(0), checkAtMs_(0),
           lastStatusMs_(0) {
         startName_[0] = '\0';
         startFaction_[0] = '\0';
+        startJobs_[0] = '\0';
+        _snprintf(expectJobs_, sizeof(expectJobs_) - 1, "%d,%d",
+                  (int)JOB_MEDIC, (int)JOB_REPAIR_ROBOT);
+        expectJobs_[sizeof(expectJobs_) - 1] = '\0';
     }
 
     virtual void onStart(const ScenarioContext& ctx) {
@@ -1767,8 +1793,9 @@ public:
         if (!c || !engine::squadNameOf(c, startName_, sizeof(startName_)))
             startName_[0] = '\0';
         engine::playerFactionName(ctx.gw, startFaction_, sizeof(startFaction_));
-        smLog("SCENARIO SMPSTART host=%d tab1='%s' faction='%s'", ctx.isHost ? 1 : 0,
-              startName_, startFaction_);
+        jobTypesOf(c, startJobs_, sizeof(startJobs_));
+        smLog("SCENARIO SMPSTART host=%d tab1='%s' faction='%s' jobs='%s'",
+              ctx.isHost ? 1 : 0, startName_, startFaction_, startJobs_);
     }
 
     virtual bool onTick(const ScenarioContext& ctx) {
@@ -1792,6 +1819,17 @@ public:
             fwriteOk_ = fok && strcmp(frb, NEW_FACTION) == 0;
             smLog("SCENARIO SMPFWRITE name='%s' readback='%s' ok=%d t=%lu",
                   NEW_FACTION, frb, fwriteOk_ ? 1 : 0, ctx.elapsedMs);
+            // The leader's jobs, from a known-empty list.
+            char jrb[96]; jrb[0] = '\0';
+            if (c) {
+                engine::clearPermajobs(c);
+                engine::addPermajob(c, (int)JOB_MEDIC, 0, 0.0f, 0.0f, 0.0f);
+                engine::addPermajob(c, (int)JOB_REPAIR_ROBOT, 0, 0.0f, 0.0f, 0.0f);
+                jobTypesOf(c, jrb, sizeof(jrb));
+            }
+            jwriteOk_ = strcmp(jrb, expectJobs_) == 0;
+            smLog("SCENARIO SMPJWRITE types='%s' readback='%s' ok=%d t=%lu",
+                  expectJobs_, jrb, jwriteOk_ ? 1 : 0, ctx.elapsedMs);
         }
 
         // ---- Host: latch what reached it, then save + load ----------------
@@ -1804,12 +1842,19 @@ public:
                 if (c) engine::squadNameOf(c, seen, sizeof(seen));
                 char fseen[72]; fseen[0] = '\0';
                 engine::playerFactionName(ctx.gw, fseen, sizeof(fseen));
+                char jseen[96];
+                jobTypesOf(c, jseen, sizeof(jseen));
                 bool match  = strcmp(seen, NEW_NAME) == 0;
                 bool fmatch = strcmp(fseen, NEW_FACTION) == 0;
-                if ((match && fmatch) || ctx.elapsedMs >= LATCH_DEADLINE_MS) {
+                bool jmatch = strcmp(jseen, expectJobs_) == 0;
+                if ((match && fmatch && jmatch) || ctx.elapsedMs >= LATCH_DEADLINE_MS) {
                     latched_ = true;
                     moved_ = match;
                     fmoved_ = fmatch;
+                    jmoved_ = jmatch;
+                    smLog("SCENARIO SMPJLATCH seen='%s' expect='%s' start='%s' "
+                          "moved=%d t=%lu", jseen, expectJobs_, startJobs_,
+                          jmoved_ ? 1 : 0, ctx.elapsedMs);
                     smLog("SCENARIO SMPLATCH seen='%s' expect='%s' start='%s' "
                           "moved=%d t=%lu", seen, NEW_NAME, startName_,
                           moved_ ? 1 : 0, ctx.elapsedMs);
@@ -1884,6 +1929,12 @@ public:
             smLog("SCENARIO SMPFPOST member='%s' iface='%s' expect='%s' start='%s' "
                   "ok=%d who=%s t=%lu", member, iface, NEW_FACTION, startFaction_,
                   fpostOk_ ? 1 : 0, who, ctx.elapsedMs);
+            // The join tab leader's jobs, in order.
+            char jpost[96];
+            jobTypesOf(c, jpost, sizeof(jpost));
+            jpostOk_ = strcmp(jpost, expectJobs_) == 0;
+            smLog("SCENARIO SMPJPOST types='%s' expect='%s' start='%s' ok=%d who=%s t=%lu",
+                  jpost, expectJobs_, startJobs_, jpostOk_ ? 1 : 0, who, ctx.elapsedMs);
         }
 
         if (ctx.elapsedMs - lastStatusMs_ >= 5000) {
@@ -1901,9 +1952,10 @@ public:
         if ((localDone && ctx.elapsedMs >= checkAtMs_ + TAIL_HOLD_MS) ||
             ctx.elapsedMs >= DURATION_MS) {
             setPassed(ctx.isHost
-                ? (moved_ && fmoved_ && saveOk_ && ackOk_ && loadOk_ && swapDone_ &&
-                   postOk_ && fpostOk_)
-                : (writeOk_ && fwriteOk_ && swapDone_ && postOk_ && fpostOk_));
+                ? (moved_ && fmoved_ && jmoved_ && saveOk_ && ackOk_ && loadOk_ &&
+                   swapDone_ && postOk_ && fpostOk_ && jpostOk_)
+                : (writeOk_ && fwriteOk_ && jwriteOk_ && swapDone_ && postOk_ &&
+                   fpostOk_ && jpostOk_));
             return true;
         }
         return false;
@@ -1921,11 +1973,14 @@ private:
 
     char          startName_[72];
     char          startFaction_[72];
+    char          startJobs_[96];
+    char          expectJobs_[32];
     bool          writeDone_, writeOk_, latched_, moved_;
     u32           ackBase_; // lastAckXferId() when our save was issued
     bool          saveIssued_, saveOk_, ackSeen_, ackOk_;
     bool          loadIssued_, loadOk_, sigWas2_, swapDone_, checked_, postOk_;
     bool          fwriteOk_, fmoved_, fpostOk_; // step 3: faction name
+    bool          jwriteOk_, jmoved_, jpostOk_; // step 4: jobs
     unsigned long lastWatchMs_, dropStartMs_, sigClearedMs_, checkAtMs_, lastStatusMs_;
 
     static const char* const SAVE_NAME;

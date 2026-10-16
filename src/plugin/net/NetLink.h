@@ -242,6 +242,10 @@ public:
     // MAIN thread, HOST: queue the authoritative faction name + acks (protocol
     // 72), broadcast to every join. Sent on change/fold + safety-resent.
     void queueFactionName(const FactionNamePacket& pkt);
+    // MAIN thread: queue a reliable permanent-job list (protocol 72). Symmetric
+    // (each client publishes the characters it owns); sent on change +
+    // safety-resent by the caller; the host relays a join's list to the others.
+    void queueJobs(const JobsPacket& pkt);
     // MAIN thread: queue a reliable runtime-fixture identity row (protocol 55).
     // Symmetric and static (a fixture's position/template never change), so this
     // is first-sight plus a slow safety resend and idles at zero traffic.
@@ -433,6 +437,8 @@ private:
     // Guarded by outCs_.
     std::vector<FactionRenamePacket> outFactionRename_;
     std::vector<FactionNamePacket>   outFactionName_;
+    // Permanent-job lists (protocol 72). Guarded by outCs_.
+    std::vector<JobsPacket>          outJobs_;
     // Reliable runtime-fixture identity rows (protocol 55). Guarded by outCs_.
     std::vector<FixturePacket>   outFixture_;
     std::vector<BuildPlacePacket> outBuildPlace_;

@@ -1,6 +1,6 @@
 # Bug #1 design: joiner squad names, faction name and jobs survive the save
 
-Status: **steps 2 (squad names) and 3 (faction name) pass in game; step 4 (jobs) in progress** —
+Status: **steps 2 (squad names) and 3 (faction name) pass in game; step 4 (jobs) implemented, not yet run in game** —
 October 16, 2026.
 Bug source: nhoral/KenshiCoop issue #74; docs/PROJECT_BRIEF.md bug table row 1.
 
@@ -243,6 +243,49 @@ covers the squad name and the faction name together):
 The switch alone decides whether the join's squad and faction names survive.
 Health PASS on both sides in both runs.
 
+## Step 4: permanent jobs (implemented, not yet run in game)
+
+- `PKT_JOBS` = 53, 607 bytes (`JobEntry` 36 bytes × `JOBS_MAX` 16, plus the
+  character hand, `count` and `total`). Same protocol 72 / 73 and the same
+  `KENSHICOOP_SQUAD_META` switch.
+- `Replicator::publishJobs` / `applyJobs`, a symmetric row after the faction
+  name.
+  - Publish: every character in `ownHands_`, 1 Hz; the list is read in order,
+    subjects of sites we minted are rewritten to the placer's key
+    (`buildKeyForLocalHand`), and an order-sensitive FNV-1a signature (type,
+    subject, location rounded to whole units) decides "changed". Sent on change
+    plus a 10 s resend, aged on the connect edge; a list longer than 16 logs
+    `TRUNCATED`.
+  - Apply: only onto a peer's squad member (`allSquad_`, never `ownHands_`).
+    Subjects translate through `localHandForBuildKey`, then
+    `localHandForFixtureKey`, else are used as sent. If the local list already
+    matches, it is marked converged; otherwise `clearPermajobs` + `addJob` in
+    order, counting after every add.
+  - An add the engine ignores logs `ADD-REJECTED` and leaves the row
+    unconverged, so the next resend retries (a body or subject that only
+    exists once its zone streams in); after 6 tries (~1 min) it logs `GAVEUP`
+    once and stops rebuilding that content until it changes. A body that does
+    not resolve logs `UNRESOLVED` once and waits for the resend.
+- Log lines: `[jobs] SEND`, `TRUNCATED`, `APPLY` (added / previous count),
+  `ADD-REJECTED`, `GAVEUP`, `UNRESOLVED`.
+- Gate: `squad_meta_persist` also clears the join tab leader's jobs and adds
+  JOB_MEDIC then JOB_REPAIR_ROBOT (`58,57`); the host latches its copy
+  (`SMPJLATCH`); post-reload both sides must read `58,57` in order
+  (`SMPJPOST`). The oracle names "right jobs, wrong order" separately.
+- Prototest: sizes, id, datagram fit, round trip. The shared `roundTrip` test
+  helper's buffer is now sized by the packet (it was a fixed 512 bytes, which
+  this 607-byte packet overflowed).
+
+Known limits:
+- As for names, a change within about a second of the host's save can miss
+  that save.
+- No-subject jobs read back a different subject on the peer than on the
+  author (steps 1/1b), so their signatures never match across machines; the
+  receiver converges by recording the applied signature, and after a reload it
+  rebuilds that character's list once more (harmless, logged as `APPLY`).
+- Two jobs of the same type on different subjects (e.g. two machines) are not
+  covered by the gate yet; whether `addJob` keeps both is unmeasured.
+
 ## Steps (branch `fix/squad-meta-persist`, one commit each)
 
 1. **Probe scenario `squad_meta_probe`** — read/write each value on own tabs,
@@ -252,7 +295,7 @@ Health PASS on both sides in both runs.
    keeps, and whether clear + re-add preserves the order of 2+ jobs. **Done.**
 2. Squad names end to end + gate (`PKT_SQUAD_NAME`, protocol bump). **Done; gate passes in game.**
 3. Faction rename op channel (`PKT_FACTION_RENAME` / `PKT_FACTION_NAME`). **Done; gate passes in game.**
-4. Jobs, including subject translation and parking.
+4. Jobs, including subject translation and parking (`PKT_JOBS`). **Implemented.**
 5. Update docs/PROJECT_BRIEF.md's bug table only after a real two-player session.
 
 Ideally reproduce the wipe once in a real session first (docs/PROJECT_BRIEF.md "baseline

@@ -594,6 +594,21 @@ public:
     // write so an applied name is never re-detected as a local rename.
     void applyFactionName(const SyncContext& ctx);
 
+    // BEFORE engine (protocol 72, Bug #1 step 4): sample the permajob list of
+    // every character THIS client owns (~1 Hz, ownHands_) and publish one
+    // PKT_JOBS row per character on change plus a safety resend. Subjects are
+    // expressed in our key space (buildKeyForLocalHand for a minted site).
+    void publishJobs(const SyncContext& ctx);
+
+    // BEFORE engine (protocol 72): drain received job lists and rebuild each
+    // onto our copy of that squad member (never one we own, never a non-squad
+    // body) by clearPermajobs + addJob in order, translating subjects through
+    // the build/fixture maps and counting after every add. A list that did not
+    // fully apply (a rejected add, an unresolved body) stays unconverged so the
+    // sender's resend retries it; after JOBS_GIVEUP_TRIES it is logged once and
+    // left alone until the content changes.
+    void applyJobs(const SyncContext& ctx);
+
     // Squad-tab and faction name sync master enable (KENSHICOOP_SQUAD_META).
     void setSquadMetaSync(bool v) { squadMetaSync_ = v; }
 
@@ -2212,6 +2227,30 @@ private:
     u32           facNameSeqOut_;    // host: monotonic
     u32           facNameAck_[MAX_PLAYERS]; // host: highest folded seq per player
     bool          facNameDirty_;     // host: a fold needs an immediate broadcast
+    // Protocol 72 permanent jobs (Bug #1 step 4), keyed by the character hand.
+    // Out rows: characters we own (signature of what we last sent). In rows:
+    // peers' characters (stale guard, last converged signature, retry budget).
+    struct JobsOut {
+        u32           sig;
+        unsigned long lastSendMs;
+        bool          sent;
+        JobsOut() : sig(0), lastSendMs(0), sent(false) {}
+    };
+    struct JobsIn {
+        u32      ownerId;
+        u32      seqSeen;
+        u32      appliedSig; // content signature that fully converged here
+        u32      failSig;    // content signature that keeps failing
+        unsigned tries;      // consecutive incomplete applies of failSig
+        bool     gaveUp;     // failSig logged as given up; no more rebuilds
+        bool     unresolvedLogged;
+        JobsIn() : ownerId(0), seqSeen(0), appliedSig(0), failSig(0), tries(0),
+                   gaveUp(false), unresolvedLogged(false) {}
+    };
+    std::map<Key, JobsOut> jobsOut_;
+    std::map<Key, JobsIn>  jobsIn_;
+    u32           jobsSeqOut_;
+    unsigned long jobsSampleMs_;
     // Protocol 55 runtime-fixture identity. A mine is instantiated per client
     // for a terrain node, so the same physical fixture has a different hand on
     // each side; without a pairing the pose inject resolves nothing (the miner

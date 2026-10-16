@@ -126,6 +126,8 @@ static void testSizes() {
     CHECK_EQ("sizeof(SquadNamePacket)",         sizeof(SquadNamePacket),         81); // v72: squad-tab name
     CHECK_EQ("sizeof(FactionRenamePacket)",     sizeof(FactionRenamePacket),     73); // v72: faction rename event
     CHECK_EQ("sizeof(FactionNamePacket)",       sizeof(FactionNamePacket),       89); // v72: faction name + acks
+    CHECK_EQ("sizeof(JobEntry)",                sizeof(JobEntry),                36); // v72: one permanent job
+    CHECK_EQ("sizeof(JobsPacket)",              sizeof(JobsPacket),              607); // v72: job list
     CHECK_EQ("sizeof(CamHintPacket)",           sizeof(CamHintPacket),           17); // v43: camera hint
     CHECK_EQ("sizeof(CellClaimPacket)",         sizeof(CellClaimPacket),         21); // v49: cell claim
     CHECK_EQ("sizeof(InvXferAckPacket)",        sizeof(InvXferAckPacket),        20); // v66: +authoritative bag framing
@@ -341,6 +343,12 @@ static void testSizes() {
     CHECK_EQ("FactionNamePacket acks every player",
              (int)(sizeof(((FactionNamePacket*)0)->ackSeq) / sizeof(u32)),
              (int)MAX_PLAYERS);
+    // Step 4: the job list takes the next tag and fits one datagram.
+    CHECK_EQ("PKT_JOBS id", (int)PKT_JOBS, 53);
+    CHECK("PKT_JOBS distinct", PKT_JOBS != PKT_FACTION_NAME &&
+          PKT_JOBS != PKT_FACTION_RENAME && PKT_JOBS != PKT_SQUAD_NAME);
+    CHECK("JobsPacket fits datagram", sizeof(JobsPacket) <= 1200);
+    CHECK("JobsPacket count fits u8", JOBS_MAX <= 255);
     CHECK_EQ("PKT_PLAYER_ROSTER id", (int)PKT_PLAYER_ROSTER, 49);
     CHECK("PKT_PLAYER_ROSTER distinct", PKT_PLAYER_ROSTER != PKT_FIXTURE &&
           PKT_PLAYER_ROSTER != PKT_DEED && PKT_PLAYER_ROSTER != PKT_HELLO);
@@ -481,7 +489,7 @@ static void roundTrip(const char* name, u8 typeTag) {
     T in;
     fillPattern(&in, (unsigned char)(typeTag * 31));
     in.type = typeTag;
-    unsigned char buf[512];
+    unsigned char buf[sizeof(T)]; // sized by the packet (JobsPacket is 607 bytes)
     std::memcpy(buf, &in, sizeof(T));
 
     char label[128];
@@ -539,6 +547,7 @@ static void testRoundTrips() {
     roundTrip<SquadNamePacket>("SquadNamePacket", (u8)PKT_SQUAD_NAME);
     roundTrip<FactionRenamePacket>("FactionRenamePacket", (u8)PKT_FACTION_RENAME);
     roundTrip<FactionNamePacket>("FactionNamePacket", (u8)PKT_FACTION_NAME);
+    roundTrip<JobsPacket>("JobsPacket", (u8)PKT_JOBS);
     roundTrip<CellClaimPacket>("CellClaimPacket", (u8)PKT_CELL_CLAIM);
     roundTrip<InvXferAckPacket>("InvXferAckPacket", (u8)PKT_INV_XFER_ACK);
 

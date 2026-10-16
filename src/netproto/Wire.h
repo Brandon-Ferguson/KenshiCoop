@@ -21,9 +21,9 @@ typedef float          f32;
 typedef double         f64;
 
 // Protocol version is checked at handshake; a mismatch is rejected (no back-compat).
-// Public 72 adds PKT_SQUAD_NAME and PKT_FACTION_RENAME/PKT_FACTION_NAME (squad
-// and faction names, Bug #1) to 70's complete bag transfers and exact merchant
-// stock/template state.
+// Public 72 adds PKT_SQUAD_NAME, PKT_FACTION_RENAME/PKT_FACTION_NAME and
+// PKT_JOBS (squad names, faction name and permanent jobs, Bug #1) to 70's
+// complete bag transfers and exact merchant stock/template state.
 #ifdef KENSHICOOP_NET_DIAG
 // Private 73 additionally carries bounded, reliable join-log chunks.
 const u16 PROTOCOL_VERSION = 73;
@@ -109,6 +109,7 @@ enum PacketType {
     PKT_SQUAD_NAME       = 50, // RELIABLE owner-published squad-tab name (protocol 72); SquadNamePacket
     PKT_FACTION_RENAME   = 51, // RELIABLE join faction-rename event (join -> host, protocol 72); FactionRenamePacket
     PKT_FACTION_NAME     = 52, // RELIABLE authoritative faction name + acks (host -> all, protocol 72); FactionNamePacket
+    PKT_JOBS             = 53, // RELIABLE owner-published permanent-job list (protocol 72); JobsPacket
 #ifdef KENSHICOOP_NET_DIAG
     PKT_DEBUG_LOG_FILE   = 250 // private JOIN -> HOST local-log byte stream
 #endif
@@ -1271,6 +1272,34 @@ struct FactionNamePacket {
     u32 seq;             // host monotonic (stale-row guard)
     u32 ackSeq[MAX_PLAYERS]; // per player id: highest rename seq folded (0 = none)
     char name[64];       // NUL-terminated authoritative name
+};
+
+// ---- Protocol 72: permanent jobs (Bug #1, step 4) ---------------------------
+// ONE writer per character - the client that owns its squad tab - publishes the
+// ordered permajob list on change plus a safety resend; every other client
+// rebuilds its copy (clearPermajobs, then addJob in list order; both preserve
+// order - squad_meta_probe2) so the host's save carries the join's jobs.
+//
+// The engine silently ignores some adds (squad_meta_probe2: a no-subject
+// JOB_KEEP_EVERYTHING_RUNNING left the count unchanged), so the receiver counts
+// after every add and keeps the row unconverged for the resend to retry.
+// Subjects ride the publisher's key space (a session-placed building as the
+// placer's key, a fixture as the publisher's own hand) and are translated on
+// apply; a subject is carried exactly as read - no value means "none".
+struct JobEntry {
+    u32 type;     // engine TaskType
+    u32 subj[5];  // subject hand [type, container, containerSerial, index, serial]
+    f32 x, y, z;  // location
+};
+const u32 JOBS_MAX = 16; // per character on the wire; more is logged as truncated
+struct JobsPacket {
+    u8  type;      // = PKT_JOBS
+    u32 ownerId;   // network player id of the sender (the squad's owner)
+    u32 seq;       // per-sender monotonic (stale-row guard)
+    u32 hand[5];   // the character [type, container, containerSerial, index, serial]
+    u8  count;     // entries used in jobs[]
+    u8  total;     // the owner's real list length (> count = truncated)
+    JobEntry jobs[JOBS_MAX];
 };
 
 #ifdef KENSHICOOP_NET_DIAG

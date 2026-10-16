@@ -11,6 +11,7 @@
 // PowerShell oracles (see resources/CODE_MAP.md, log-tag index).
 
 #include "ReplicatorUtil.h"
+#include "../../netproto/ContentHash.h" // fnv1aInit/Update (job-list signature)
 
 namespace coop {
 
@@ -1736,6 +1737,232 @@ void Replicator::applyFactionName(const SyncContext& ctx) {
     }
 }
 
+// ---- Protocol 72: permanent jobs (Bug #1 step 4) ----------------------------
+// See the JobsPacket comment in Wire.h. squad_meta_probe / squad_meta_probe2
+// measured what this rests on: OrdersReceiver::addJob appends and persists,
+// clear + re-add keeps the order, a no-subject job's subject is not a stable
+// "none" value, and some adds are silently ignored.
+
+namespace {
+// Order-sensitive signature of a job list: type, subject and location rounded
+// to whole units (float noise must not read as a change).
+u32 jobsSignature(const JobEntry* e, unsigned int n) {
+    unsigned int h = fnv1aInit();
+    h = fnv1aUpdate(h, &n, sizeof(n));
+    for (unsigned int i = 0; i < n; ++i) {
+        int loc[3];
+        loc[0] = (int)floor(e[i].x + 0.5f);
+        loc[1] = (int)floor(e[i].y + 0.5f);
+        loc[2] = (int)floor(e[i].z + 0.5f);
+        h = fnv1aUpdate(h, &e[i].type, sizeof(e[i].type));
+        h = fnv1aUpdate(h, e[i].subj, sizeof(e[i].subj));
+        h = fnv1aUpdate(h, loc, sizeof(loc));
+    }
+    return (u32)h;
+}
+
+// "58,57" - the type sequence, for the log lines and the gate.
+void jobTypesText(const JobEntry* e, unsigned int n, char* out, unsigned int cap) {
+    out[0] = '\0';
+    size_t used = 0;
+    for (unsigned int i = 0; i < n; ++i) {
+        int w = _snprintf(out + used, cap - 1 - used, "%s%u", i ? "," : "", e[i].type);
+        if (w < 0) break;
+        used += (size_t)w;
+    }
+    out[cap - 1] = '\0';
+}
+
+// Read a character's list into wire entries (local subjects). -1 = unreadable.
+int readJobEntries(Character* c, JobEntry* out, unsigned int maxOut) {
+    const unsigned int READ_MAX = 32;
+    engine::PermajobRead jr[READ_MAX];
+    int n = engine::readPermajobs(c, jr, READ_MAX);
+    if (n < 0) return -1;
+    unsigned int m = (unsigned int)n < maxOut ? (unsigned int)n : maxOut;
+    if (m > READ_MAX) m = READ_MAX;
+    for (unsigned int i = 0; i < m; ++i) {
+        out[i].type = (u32)jr[i].type;
+        for (unsigned int k = 0; k < 5; ++k) out[i].subj[k] = jr[i].subj[k];
+        out[i].x = jr[i].x; out[i].y = jr[i].y; out[i].z = jr[i].z;
+    }
+    return n;
+}
+} // namespace
+
+void Replicator::publishJobs(const SyncContext& ctx) {
+    NetLink& net = *ctx.net; u32 ownerId = ctx.localId;
+    if (!squadMetaSync_) return;
+    unsigned long now = nowMs();
+    if (!sync::gateSampleDue(now, jobsSampleMs_, tuning_.jobsSampleMs)) return;
+    jobsSampleMs_ = now;
+
+    for (std::set<Key>::const_iterator it = ownHands_.begin(); it != ownHands_.end(); ++it) {
+        const Key& k = *it;
+        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        if (!c) continue;
+        JobEntry jobs[JOBS_MAX];
+        int total = readJobEntries(c, jobs, JOBS_MAX);
+        if (total < 0) continue;
+        unsigned int count = (unsigned int)total < JOBS_MAX ? (unsigned int)total : JOBS_MAX;
+        // Subjects in OUR key space: a site we minted for the peer travels as
+        // the placer's key; everything else (save-resident, our own placement,
+        // our fixtures) is already the key the peer can translate.
+        for (unsigned int i = 0; i < count; ++i) {
+            Key local; local.t = jobs[i].subj[0]; local.c = jobs[i].subj[1];
+            local.cs = jobs[i].subj[2]; local.i = jobs[i].subj[3]; local.s = jobs[i].subj[4];
+            Key wire;
+            if (buildKeyForLocalHand(local, wire)) {
+                jobs[i].subj[0] = wire.t; jobs[i].subj[1] = wire.c; jobs[i].subj[2] = wire.cs;
+                jobs[i].subj[3] = wire.i; jobs[i].subj[4] = wire.s;
+            }
+        }
+        u32 sig = jobsSignature(jobs, count);
+        JobsOut& o = jobsOut_[k];
+        bool changed = !o.sent || o.sig != sig;
+        if (!sync::gateShouldSend(changed, now, o.lastSendMs, /*minSendMs*/ 0,
+                                  tuning_.jobsResendMs, /*resendUnsent*/ true))
+            continue;
+        o.sig = sig; o.sent = true; o.lastSendMs = now;
+        JobsPacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type    = (u8)PKT_JOBS;
+        pkt.ownerId = ownerId;
+        pkt.seq     = jobsSeqOut_++;
+        pkt.hand[0] = k.t; pkt.hand[1] = k.c; pkt.hand[2] = k.cs;
+        pkt.hand[3] = k.i; pkt.hand[4] = k.s;
+        pkt.count   = (u8)count;
+        pkt.total   = (u8)(total > 255 ? 255 : total);
+        for (unsigned int i = 0; i < count; ++i) pkt.jobs[i] = jobs[i];
+        net.queueJobs(pkt);
+        if (changed) { // resends stay silent; the new list is the signal
+            char types[96];
+            jobTypesText(jobs, count, types, sizeof(types));
+            char b[224];
+            _snprintf(b, sizeof(b) - 1,
+                      "[jobs] SEND char=%u.%u.%u.%u.%u n=%u total=%d types=[%s] seq=%u",
+                      k.t, k.c, k.cs, k.i, k.s, count, total, types, pkt.seq);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            if ((unsigned int)total > JOBS_MAX) {
+                _snprintf(b, sizeof(b) - 1,
+                          "[jobs] TRUNCATED char=%u.%u.%u.%u.%u total=%d sent=%u",
+                          k.t, k.c, k.cs, k.i, k.s, total, count);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+    }
+}
+
+void Replicator::applyJobs(const SyncContext& ctx) {
+    Inbound& in = *ctx.in;
+    std::deque<InboundJobs> got;
+    in.drainJobs(got);
+    if (got.empty()) return;
+    if (!squadMetaSync_) return;
+    const unsigned int JOBS_GIVEUP_TRIES = 6; // ~1 min of resends
+    for (std::deque<InboundJobs>::iterator it = got.begin(); it != got.end(); ++it) {
+        const JobsPacket& p = it->pkt;
+        Key k; k.t = p.hand[0]; k.c = p.hand[1]; k.cs = p.hand[2];
+        k.i = p.hand[3]; k.s = p.hand[4];
+        // Only a PEER's squad member: never a body we own (our list is the
+        // authority), never a world NPC that happens to share a hand.
+        if (ownHands_.count(k) != 0) continue;
+        if (allSquad_.count(k) == 0) continue;
+        JobsIn& r = jobsIn_[k];
+        if (r.ownerId != it->ownerId) { r.ownerId = it->ownerId; r.seqSeen = 0; }
+        if (!sync::gateSeqAccept(r.seqSeen, p.seq)) continue; // stale/dup row
+        r.seqSeen = p.seq;
+
+        unsigned int count = p.count < JOBS_MAX ? p.count : JOBS_MAX;
+        // Desired list in OUR key space: a placed site through the build map,
+        // a runtime fixture through the fixture pairing, anything else as sent.
+        JobEntry want[JOBS_MAX];
+        for (unsigned int i = 0; i < count; ++i) {
+            want[i] = p.jobs[i];
+            Key wire; wire.t = p.jobs[i].subj[0]; wire.c = p.jobs[i].subj[1];
+            wire.cs = p.jobs[i].subj[2]; wire.i = p.jobs[i].subj[3]; wire.s = p.jobs[i].subj[4];
+            unsigned int local[5];
+            if (localHandForBuildKey(wire, local) || localHandForFixtureKey(wire, local))
+                for (unsigned int h = 0; h < 5; ++h) want[i].subj[h] = local[h];
+        }
+        u32 wantSig = jobsSignature(want, count);
+        if (r.appliedSig == wantSig && r.appliedSig != 0) continue; // converged
+        if (r.gaveUp && r.failSig == wantSig) continue;             // logged once
+
+        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        if (!c) {
+            if (!r.unresolvedLogged) {
+                r.unresolvedLogged = true;
+                char b[160];
+                _snprintf(b, sizeof(b) - 1,
+                          "[jobs] UNRESOLVED char=%u.%u.%u.%u.%u from=%u seq=%u",
+                          k.t, k.c, k.cs, k.i, k.s, it->ownerId, p.seq);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            continue; // the resend retries
+        }
+        r.unresolvedLogged = false;
+
+        // Already identical here (the save, or a resend after convergence)?
+        JobEntry have[JOBS_MAX];
+        int haveN = readJobEntries(c, have, JOBS_MAX);
+        if (haveN >= 0 && (unsigned int)haveN == count &&
+            jobsSignature(have, count) == wantSig) {
+            r.appliedSig = wantSig;
+            r.failSig = 0; r.tries = 0; r.gaveUp = false;
+            continue;
+        }
+
+        // Rebuild: clear, then add in order, counting after every add.
+        engine::clearPermajobs(c);
+        unsigned int added = 0, rejected = 0;
+        char rejectedTypes[96]; rejectedTypes[0] = '\0';
+        size_t rUsed = 0;
+        for (unsigned int i = 0; i < count; ++i) {
+            JobEntry before[1];
+            int nb = readJobEntries(c, before, 0);
+            engine::addPermajob(c, (int)want[i].type, want[i].subj,
+                                want[i].x, want[i].y, want[i].z);
+            int na = readJobEntries(c, before, 0);
+            if (nb >= 0 && na == nb + 1) { ++added; continue; }
+            ++rejected;
+            int w = _snprintf(rejectedTypes + rUsed, sizeof(rejectedTypes) - 1 - rUsed,
+                              "%s%u", rUsed ? "," : "", want[i].type);
+            if (w > 0) rUsed += (size_t)w;
+        }
+        rejectedTypes[sizeof(rejectedTypes) - 1] = '\0';
+
+        char types[96];
+        jobTypesText(want, count, types, sizeof(types));
+        char b[256];
+        _snprintf(b, sizeof(b) - 1,
+                  "[jobs] APPLY char=%u.%u.%u.%u.%u from=%u n=%u added=%u was=%d "
+                  "types=[%s] seq=%u", k.t, k.c, k.cs, k.i, k.s, it->ownerId, count,
+                  added, haveN, types, p.seq);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+
+        if (rejected == 0) {
+            r.appliedSig = wantSig;
+            r.failSig = 0; r.tries = 0; r.gaveUp = false;
+            continue;
+        }
+        // Incomplete: stay unconverged so the resend retries; never silent.
+        if (r.failSig != wantSig) { r.failSig = wantSig; r.tries = 0; r.gaveUp = false; }
+        ++r.tries;
+        _snprintf(b, sizeof(b) - 1,
+                  "[jobs] ADD-REJECTED char=%u.%u.%u.%u.%u types=[%s] try=%u",
+                  k.t, k.c, k.cs, k.i, k.s, rejectedTypes, r.tries);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        if (r.tries >= JOBS_GIVEUP_TRIES) {
+            r.gaveUp = true;
+            _snprintf(b, sizeof(b) - 1,
+                      "[jobs] GAVEUP char=%u.%u.%u.%u.%u types=[%s] after=%u tries",
+                      k.t, k.c, k.cs, k.i, k.s, rejectedTypes, r.tries);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+}
+
 // ---- Protocol 55: runtime-fixture identity ----------------------------------
 // See the FixturePacket comment in Wire.h for the measurement that motivates
 // this channel (the same mine carrying hand 50.2399902464 on the host and
@@ -2178,7 +2405,8 @@ void Replicator::driveSampledChannels(const SyncContext& ctx) {
         { &Replicator::squadMetaSync_, 0,                    &Replicator::publishSquadNames, &Replicator::applySquadNames, false },
         // Symmetric row: both roles publish (join = rename events, host = the
         // total) and both apply (host = fold, join = adopt).
-        { &Replicator::squadMetaSync_, 0,                    &Replicator::publishFactionName, &Replicator::applyFactionName, false }
+        { &Replicator::squadMetaSync_, 0,                    &Replicator::publishFactionName, &Replicator::applyFactionName, false },
+        { &Replicator::squadMetaSync_, 0,                    &Replicator::publishJobs,       &Replicator::applyJobs,       false }
     };
     const int n = (int)(sizeof(kCh) / sizeof(kCh[0]));
     for (int i = 0; i < n; ++i) {
@@ -2284,6 +2512,9 @@ void Replicator::onPeerConnected(NetLink& net, u32 ownerId) {
         if (it->second.lastSendMs != 0) it->second.lastSendMs = 1;
     // The host's faction-name total: same ageing (one value, like the pool).
     if (facNameSentMs_ != 0) facNameSentMs_ = 1;
+    // Permanent-job lists (protocol 72): same ageing as the tab names.
+    for (std::map<Key, JobsOut>::iterator it = jobsOut_.begin(); it != jobsOut_.end(); ++it)
+        if (it->second.lastSendMs != 0) it->second.lastSendMs = 1;
 
     char b[240];
     _snprintf(b, sizeof(b) - 1,

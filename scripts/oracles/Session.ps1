@@ -976,6 +976,8 @@ function Test-SquadMetaProbe2 {
 # Step 3 runs the same four checks for the FACTION name (SMPFWRITE, SMPFLATCH,
 # SMPFPOST), where the post-load check requires BOTH the displayed field and
 # the saved field (PlayerInterface::factionName) to hold the join's name.
+# Step 4 runs them for the join tab leader's permanent JOBS (SMPJWRITE,
+# SMPJLATCH, SMPJPOST): the type sequence must match, in order.
 function Test-SquadMetaPersist {
     param([string]$HostFile, [string]$JoinFile)
     $why = @()
@@ -1055,11 +1057,48 @@ function Test-SquadMetaPersist {
         $why += "the two clients disagree on the faction post-load (host '$hostF', join '$joinF')"
     }
 
+    # ---- Step 4: the join tab leader's permanent jobs ----------------------
+    $jw = Select-String -Path $JoinFile -Pattern "SCENARIO SMPJWRITE types='([^']*)' readback='([^']*)' ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($null -eq $jw) { $why += "join never logged its SMPJWRITE" }
+    elseif ($jw.Matches[0].Groups[3].Value -ne '1') { $why += "join's local jobs did not read back (got '$($jw.Matches[0].Groups[2].Value)', want '$($jw.Matches[0].Groups[1].Value)')" }
+
+    $jl = Select-String -Path $HostFile -Pattern "SCENARIO SMPJLATCH seen='([^']*)' expect='([^']*)' start='([^']*)' moved=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    $jexpect = ''
+    if ($null -eq $jl) { $why += "host never latched the jobs (SMPJLATCH)" }
+    else {
+        $g = $jl.Matches[0].Groups
+        $jexpect = $g[2].Value
+        if ($g[4].Value -eq '1') { Write-Host "    FINDING: host saw the join leader's jobs as [$($g[1].Value)] before the save" }
+        else { $why += "host still saw jobs [$($g[1].Value)] at save time - the join's job list never reached the authority" }
+    }
+
+    $jpostRe = "SCENARIO SMPJPOST types='([^']*)' expect='([^']*)' start='([^']*)' ok=(\d) who=(host|join)"
+    $hostJ = ''; $joinJ = ''
+    foreach ($side in @(@($HostFile, 'host'), @($JoinFile, 'join'))) {
+        $file = $side[0]; $tag = $side[1]
+        $p = Select-String -Path $file -Pattern $jpostRe -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $p) { $why += "$tag never logged its post-load SMPJPOST"; continue }
+        $g = $p.Matches[0].Groups
+        if ($tag -eq 'host') { $hostJ = $g[1].Value } else { $joinJ = $g[1].Value }
+        if ($g[4].Value -ne '1') {
+            $gotSorted  = (@($g[1].Value -split ',') | Sort-Object) -join ','
+            $wantSorted = (@($g[2].Value -split ',') | Sort-Object) -join ','
+            $tail = if ($g[1].Value -eq $g[3].Value) { " - this is the pre-change list, the original Bug #1 wipe" }
+                    elseif ($gotSorted -eq $wantSorted) { " - right jobs, wrong order" }
+                    else { "" }
+            $why += "$tag jobs came back as [$($g[1].Value)], want [$($g[2].Value)]$tail"
+        }
+    }
+    if ($hostJ -ne '' -and $joinJ -ne '' -and $hostJ -ne $joinJ) {
+        $why += "the two clients disagree on the jobs post-load (host [$hostJ], join [$joinJ])"
+    }
+
     $v = if ($why.Count -eq 0) { "PASS" } else { "FAIL" }
     $detail = $why -join "; "
-    Write-Host "  SQUAD-META-PERSIST $v - expect='$expect' hostPost='$hostPost' joinPost='$joinPost' faction expect='$fexpect' host='$hostF' join='$joinF' $detail"
+    Write-Host "  SQUAD-META-PERSIST $v - expect='$expect' hostPost='$hostPost' joinPost='$joinPost' faction expect='$fexpect' host='$hostF' join='$joinF' jobs expect=[$jexpect] host=[$hostJ] join=[$joinJ] $detail"
     return (Add-GateResult -Name "squad_meta_persist" -Status $v `
                 -Metrics @{ expect = $expect; hostPost = $hostPost; joinPost = $joinPost;
-                            fexpect = $fexpect; hostFaction = $hostF; joinFaction = $joinF } -Detail $detail)
+                            fexpect = $fexpect; hostFaction = $hostF; joinFaction = $joinF;
+                            jexpect = $jexpect; hostJobs = $hostJ; joinJobs = $joinJ } -Detail $detail)
 }
 

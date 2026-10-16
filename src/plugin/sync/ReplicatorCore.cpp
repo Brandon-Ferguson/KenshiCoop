@@ -96,6 +96,7 @@ Replicator::Replicator()
       facNameSeeded_(false), facNameSampleMs_(0), facRenameSeq_(0),
       facRenamePending_(0), facNameSeqSeen_(0), facNameSentMs_(0),
       facNameSeqOut_(1), facNameDirty_(false),
+      jobsSeqOut_(1), jobsSampleMs_(0),
       fixtureSeqOut_(1), fixtureSampleMs_(0), fixtureSync_(true),
       storeSync_(false), contCensusMs_(0),
       timeSync_(true), timeBrake_(true),
@@ -275,6 +276,8 @@ void Replicator::resetSession() {
     facNameSentMs_    = 0;
     facNameDirty_     = false;
     memset(facNameAck_, 0, sizeof(facNameAck_));
+    jobsOut_.clear(); // protocol 72: every owned list re-sent from the new world
+    jobsIn_.clear();
     facRows_.clear();
     invPub_.clear();
     invRecv_.clear();
@@ -380,6 +383,7 @@ void Replicator::resetSession() {
     deedAuditMs_ = 0;
     squadNameSampleMs_ = 0;
     facNameSampleMs_ = 0;
+    jobsSampleMs_ = 0;
     // A coordinated load re-instantiates every runtime fixture, so both halves
     // of the protocol-55 pairing are stale: re-announce and re-match from
     // scratch rather than translate a hand into a destroyed object.

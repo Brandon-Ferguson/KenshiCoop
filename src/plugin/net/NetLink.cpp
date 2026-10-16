@@ -423,6 +423,8 @@ void NetLink::queueFactionRename(const FactionRenamePacket& pkt) { pushLocked(ou
 
 void NetLink::queueFactionName(const FactionNamePacket& pkt) { pushLocked(outCs_, outFactionName_, pkt); }
 
+void NetLink::queueJobs(const JobsPacket& pkt) { pushLocked(outCs_, outJobs_, pkt); }
+
 void NetLink::queueFixture(const FixturePacket& pkt) { pushLocked(outCs_, outFixture_, pkt); }
 
 
@@ -1291,6 +1293,14 @@ void NetLink::threadLoop() {
                         if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &fnp)
                             && inbound_) {
                             inbound_->pushFactionName(fnp.ownerId, fnp);
+                        }
+                    } else if (type == PKT_JOBS) {
+                        // Reliable permanent-job list (protocol 72): symmetric,
+                        // rebuilt onto characters this client does not own.
+                        JobsPacket jp;
+                        if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &jp)
+                            && inbound_) {
+                            inbound_->pushJobs(jp.ownerId, jp);
                         }
                     } else if (!isHost_ && type == PKT_PLAYER_ROSTER) {
                         // The player roster (protocol 56), host -> everyone. This
@@ -2271,6 +2281,26 @@ void NetLink::threadLoop() {
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
                 enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+
+        // Drain + send permanent-job lists on CH_RELIABLE (protocol 72).
+        // SYMMETRIC - each client publishes the characters it owns; the host's
+        // generic relay forwards a join's list to the other joins. 607 bytes,
+        // well inside one datagram.
+        std::vector<JobsPacket> jobsPkts;
+        EnterCriticalSection(&outCs_);
+        jobsPkts.swap(outJobs_);
+        LeaveCriticalSection(&outCs_);
+        for (size_t i = 0; i < jobsPkts.size(); ++i) {
+            ENetPacket* out = enet_packet_create(&jobsPkts[i], sizeof(JobsPacket),
+                                                 ENET_PACKET_FLAG_RELIABLE);
+            if (isHost_) {
+                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+            } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+                enet_peer_send(serverPeer_, CH_RELIABLE, out);
             } else {
                 enet_packet_destroy(out);
             }

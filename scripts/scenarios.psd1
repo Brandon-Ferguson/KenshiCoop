@@ -1542,13 +1542,14 @@
             Tier = 'probe'; WanVariant = $false
         }
 
-        # squad_meta_persist: the regression gate for the squad-name and
-        # faction-name parts of Bug #1 (protocol 72). The JOIN renames its own
-        # squad tab and the player faction, the host latches the names it sees
-        # (recording whether each rename arrived), then coordinated-saves and
-        # loads mid-session. Gates that BOTH clients read the join's names back
-        # after the reload - for the faction, in both the displayed and the
-        # saved field; coming back with the old names IS the bug, which
+        # squad_meta_persist: the regression gate for Bug #1 (protocol 72) -
+        # squad names, the faction name and permanent jobs. The JOIN renames
+        # its own squad tab and the player faction and gives its tab leader two
+        # jobs; the host latches what it sees for each (recording whether each
+        # change arrived), then coordinated-saves and loads mid-session. Gates
+        # that BOTH clients read the join's values back after the reload - the
+        # faction in both the displayed and the saved field, the jobs in order;
+        # coming back with the old values IS the bug, which
         # KENSHICOOP_SQUAD_META=0 reproduces. clock_sync is not gated (the load
         # restarts the clock series), as for money_persist.
         squad_meta_persist = @{

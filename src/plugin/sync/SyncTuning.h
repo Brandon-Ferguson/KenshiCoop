@@ -62,6 +62,12 @@ struct SyncTuning {
     unsigned long facNameSampleMs;
     unsigned long facNameResendMs;
 
+    // Permanent jobs (protocol 72): set up rarely; 1 Hz sample. The resend is
+    // also the retry for a list that did not fully apply on the peer (a body
+    // not loaded yet, a subject that only resolves once its zone streams in).
+    unsigned long jobsSampleMs;
+    unsigned long jobsResendMs;
+
     // Placed buildings - construction progress (protocol 27).
     unsigned long buildSampleMs;
     unsigned long buildResendMs;
@@ -79,6 +85,7 @@ struct SyncTuning {
           deedSampleMs(1000),     deedResendMs(15000),
           squadNameSampleMs(1000), squadNameResendMs(10000),
           facNameSampleMs(1000),  facNameResendMs(10000),
+          jobsSampleMs(1000),     jobsResendMs(10000),
           buildSampleMs(1000),    buildResendMs(10000),
           bdoorSampleMs(1000),    bdoorResendMs(10000) {}
 };
