@@ -1,6 +1,7 @@
 # Bug #1 design: joiner squad names, faction name and jobs survive the save
 
-Status: **approved plan, step 1 (probe) in progress** — October 15, 2026.
+Status: **step 1 probe run (see "Step 1 results"); step 1b follow-up probe in
+progress** — October 16, 2026.
 Bug source: nhoral/KenshiCoop issue #74; docs/PROJECT_BRIEF.md bug table row 1.
 
 ## Symptom
@@ -92,11 +93,47 @@ Rules:
    player's nick and may overwrite a joiner-chosen character name. Record, do
    not fix here.
 
+## Step 1 results (run `20261016_151922`, Harness, local two-client loopback)
+
+Save `sync` (two squad tabs: host rank 0 `Nameless_0`, join rank 1 `Nameless_1`).
+Verdict PASS (`squad_meta_probe` primary); advisory `march` FAIL is the
+unrelated walking-smoothness metric (idleFrac 0.0137 vs 0.01).
+
+1. **Tab identity — same on both sides.** Containers `1,3079467776` (rank 0) and
+   `7,2303466752` (rank 1) and both leader hands are identical on host and join.
+   Container identity is a valid wire key for squad tabs. The mid-session
+   new-tab case is still untested.
+2. **Persistence.**
+   - `ActivePlatoon::setName` **persists**: the host's `SMProbe Host Squad`
+     came back after reload on both sides.
+   - `Faction::setName` **does not persist**: it reads back
+     `SMProbe Host Faction` immediately, but after reload both sides read
+     `Nameless`. The saved faction name comes from another field → step 1b.
+   - Squad-bar refresh without reload: not observed (no UI check in the probe).
+3. **Permajobs.** `OrdersReceiver::addJob(type, hand(), loc, shift=true)`
+   appends: JOB_MEDIC (TaskType 58) went 0 → 1 on both sides and **persists**
+   through the save. A job added with a default `hand()` reads back subject
+   `index,serial = 0,126` (host) / `0,132` (join), **not all zero** — the
+   channel must carry the subject as read, never treat all-zero as "none".
+   **Order is untested**: the join leader had no jobs, so the clear + re-add
+   round trip was skipped → step 1b.
+4. **Puppets.** After the host appended JOB_MEDIC to the join's puppet, its
+   current task stayed TASK_NONE (65535) with 1 job in all 10 samples (1 Hz).
+   No GOAP wake-up within 10 s.
+
+**Bug #1 reproduced.** The join renamed its tab and the faction and added a job
+(all read back). The host still saw `Nameless_1` at save time. After reload the
+join's tab was `Nameless_1` again, its faction `Nameless`, and its leader's job
+list was the one the **host** had written onto the puppet (subject `0,126`),
+not the join's own (`0,132`). The host's own rename survived on both sides.
+
 ## Steps (branch `fix/squad-meta-persist`, one commit each)
 
 1. **Probe scenario `squad_meta_probe`** — read/write each value on own tabs,
    peer tabs and the faction; save → reload → re-read. Answers 1–4. No protocol
-   change.
+   change. **Done** (results above).
+1b. **Follow-up probe `squad_meta_probe2`** — which faction field the save
+   keeps, and whether clear + re-add preserves the order of 2+ jobs.
 2. Squad names end to end + gate.
 3. Faction rename op channel.
 4. Jobs, including subject translation and parking.
