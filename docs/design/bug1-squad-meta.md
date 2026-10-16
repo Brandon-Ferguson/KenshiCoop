@@ -1,6 +1,6 @@
 # Bug #1 design: joiner squad names, faction name and jobs survive the save
 
-Status: **steps 2 (squad names) and 3 (faction name) pass in game; step 4 (jobs) implemented, not yet run in game** —
+Status: **steps 2-4 (squad names, faction name, jobs) pass the in-game A/B gate; awaiting a real two-player session** —
 October 16, 2026.
 Bug source: nhoral/KenshiCoop issue #74; docs/PROJECT_BRIEF.md bug table row 1.
 
@@ -243,7 +243,7 @@ covers the squad name and the faction name together):
 The switch alone decides whether the join's squad and faction names survive.
 Health PASS on both sides in both runs.
 
-## Step 4: permanent jobs (implemented, not yet run in game)
+## Step 4: permanent jobs (implemented; gate passes in game)
 
 - `PKT_JOBS` = 53, 607 bytes (`JobEntry` 36 bytes × `JOBS_MAX` 16, plus the
   character hand, `count` and `total`). Same protocol 72 / 73 and the same
@@ -279,12 +279,25 @@ Health PASS on both sides in both runs.
 Known limits:
 - As for names, a change within about a second of the host's save can miss
   that save.
-- No-subject jobs read back a different subject on the peer than on the
-  author (steps 1/1b), so their signatures never match across machines; the
+- No-subject jobs can read back a different subject on the peer than on the
+  author (steps 1/1b), so their signatures may not match across machines; the
   receiver converges by recording the applied signature, and after a reload it
-  rebuilds that character's list once more (harmless, logged as `APPLY`).
+  may rebuild that character's list once more (harmless, logged as `APPLY`).
+  In the in-game run below the lists matched after reload and no rebuild was
+  needed.
 - Two jobs of the same type on different subjects (e.g. two machines) are not
   covered by the gate yet; whether `addJob` keeps both is unmeasured.
+
+In-game A/B (Harness, local two-client loopback, save `sync`; the gate now
+covers squad name, faction name and jobs together):
+
+| Run | Channel | Verdict | What happened |
+|---|---|---|---|
+| `20261016_171852` | on | **PASS** | The join leader started with no jobs; at 8.0 s the join cleared it and added `58,57`, read it back and sent `[jobs] SEND ... n=2 total=2 types=[58,57]`. The host logged `[jobs] APPLY ... from=1 n=2 added=2 was=0 types=[58,57]` (nothing rejected), latched all three values at 9.0 s (`moved=1` each), saved and loaded. After reload both sides read `58,57` in order, with the squad name and both faction fields also correct. No `ADD-REJECTED`, `GAVEUP`, `UNRESOLVED` or `TRUNCATED` lines on either side. |
+| `20261016_172129` | off (`off=[...]` in both logs; no `[jobs]` lines) | **FAIL** (intended) | Same three changes on the join, all read back. At the 18 s deadline the host still had `Nameless_1`, `Nameless` and no jobs (`moved=0` each), saved and loaded; both sides came back `Nameless_1`, `Nameless` and an empty list — the Bug #1 wipe for all three, named by the oracle. |
+
+The switch alone decides whether the join's squad names, faction name and jobs
+survive the host's save. Health PASS on both sides in both runs.
 
 ## Steps (branch `fix/squad-meta-persist`, one commit each)
 
@@ -295,7 +308,7 @@ Known limits:
    keeps, and whether clear + re-add preserves the order of 2+ jobs. **Done.**
 2. Squad names end to end + gate (`PKT_SQUAD_NAME`, protocol bump). **Done; gate passes in game.**
 3. Faction rename op channel (`PKT_FACTION_RENAME` / `PKT_FACTION_NAME`). **Done; gate passes in game.**
-4. Jobs, including subject translation and parking (`PKT_JOBS`). **Implemented.**
+4. Jobs, including subject translation and parking (`PKT_JOBS`). **Done; gate passes in game.**
 5. Update docs/PROJECT_BRIEF.md's bug table only after a real two-player session.
 
 Ideally reproduce the wipe once in a real session first (docs/PROJECT_BRIEF.md "baseline
