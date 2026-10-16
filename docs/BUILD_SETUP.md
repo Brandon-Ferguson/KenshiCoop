@@ -169,8 +169,8 @@ required notices for the actual distributed components remain available under
 their respective licenses; do not assume a precompiled dependency bundle or
 the project's automatic source ZIP alone satisfies every obligation.
 
-The current public Release pair uses protocol 70; the Harness pair uses
-`NET_DIAG` protocol 71. Both share the load-specific READY barrier and a 1 ms
+The current public Release pair uses protocol 72; the Harness pair uses
+`NET_DIAG` protocol 73. Both share the load-specific READY barrier and a 1 ms
 maximum idle ENet wait; only the diagnostic pair mirrors the client's local log.
 Harness forcibly disables the public updater; distribute it as a manual kit.
 The packed `TimePacket` is 21 bytes in both configurations (`readyLoadId` is

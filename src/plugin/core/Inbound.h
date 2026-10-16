@@ -249,6 +249,13 @@ struct InboundDeed {
     DeedPacket pkt;
 };
 
+// One received squad-tab name (protocol 72, Bug #1): the tab's owner reports
+// its current name; every other client writes it onto its own copy of the tab.
+struct InboundSquadName {
+    u32             ownerId;
+    SquadNamePacket pkt;
+};
+
 // One received runtime-fixture identity row (protocol 55): a peer names the
 // hand it uses for a fixture and describes where/what it is, so we can pair it
 // with our own copy. Carries no gameplay state - only identity.
@@ -436,7 +443,7 @@ public:
         buildPlace_(worldReset_), buildState_(worldReset_),
         buildDoor_(worldReset_),  buildRemove_(worldReset_), stealth_(worldReset_, 512),
         spawnReq_(worldReset_),   spawnInfo_(worldReset_),  camHint_(worldReset_, 64),
-        cellClaim_(worldReset_, 64) {
+        cellClaim_(worldReset_, 64), squadName_(worldReset_) {
         InitializeCriticalSection(&cs_);
     }
     ~Inbound() { DeleteCriticalSection(&cs_); }
@@ -611,6 +618,11 @@ public:
         InboundDeed id; id.ownerId = ownerId; id.pkt = pkt;
         EnterCriticalSection(&cs_); deed_.push_back(id); LeaveCriticalSection(&cs_);
     }
+    // NET thread: one received squad-tab name (protocol 72), owner-tagged.
+    void pushSquadName(u32 ownerId, const SquadNamePacket& pkt) {
+        InboundSquadName sn; sn.ownerId = ownerId; sn.pkt = pkt;
+        EnterCriticalSection(&cs_); squadName_.push_back(sn); LeaveCriticalSection(&cs_);
+    }
     // NET thread: one received fixture identity row (protocol 55), owner-tagged.
     void pushFixture(u32 ownerId, const FixturePacket& pkt) {
         InboundFixture ifx; ifx.ownerId = ownerId; ifx.pkt = pkt;
@@ -778,6 +790,9 @@ public:
     void drainDeed(std::deque<InboundDeed>& out) {
         EnterCriticalSection(&cs_); out.swap(deed_); LeaveCriticalSection(&cs_);
     }
+    void drainSquadName(std::deque<InboundSquadName>& out) {
+        EnterCriticalSection(&cs_); out.swap(squadName_); LeaveCriticalSection(&cs_);
+    }
     void drainFixture(std::deque<InboundFixture>& out) {
         EnterCriticalSection(&cs_); out.swap(fixture_); LeaveCriticalSection(&cs_);
     }
@@ -913,6 +928,7 @@ private:
     WorldQ<InboundSpawnInfo>       spawnInfo_;
     WorldQ<InboundCamHint>         camHint_;
     WorldQ<InboundCellClaim>       cellClaim_;
+    WorldQ<InboundSquadName>       squadName_;
 
     // SESSION-PRESERVING: coordinated save (protocol 31) + load (protocol 32)
     // handshake - a GO/NACK/chunk arriving mid-swap must survive the reset.

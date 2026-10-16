@@ -92,6 +92,7 @@ Replicator::Replicator()
       prodSeqOut_(1), prodSampleMs_(0), prodSync_(true),
       researchSeqOut_(1), researchSampleMs_(0), researchSync_(true),
       deedSeqOut_(1), deedSampleMs_(0), deedAuditMs_(0), deedSync_(true),
+      squadNameSeqOut_(1), squadNameSampleMs_(0), squadMetaSync_(true),
       fixtureSeqOut_(1), fixtureSampleMs_(0), fixtureSync_(true),
       storeSync_(false), contCensusMs_(0),
       timeSync_(true), timeBrake_(true),
@@ -257,6 +258,8 @@ void Replicator::resetSession() {
     prodRows_.clear();
     researchRows_.clear(); // protocol 38: re-baselined from the new world's store
     deedRows_.clear();     // protocol 54: re-baselined from the new world's owned set
+    squadNameOut_.clear(); // protocol 72: every owned tab name re-sent from the new world
+    squadNameIn_.clear();
     facRows_.clear();
     invPub_.clear();
     invRecv_.clear();
@@ -360,6 +363,7 @@ void Replicator::resetSession() {
     researchSampleMs_ = 0;
     deedSampleMs_ = 0;
     deedAuditMs_ = 0;
+    squadNameSampleMs_ = 0;
     // A coordinated load re-instantiates every runtime fixture, so both halves
     // of the protocol-55 pairing are stale: re-announce and re-match from
     // scratch rather than translate a hand into a destroyed object.

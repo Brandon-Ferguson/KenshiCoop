@@ -163,6 +163,7 @@ function Invoke-OneOracle {
         "money_persist"  { return (Test-MoneyPersist   -HostFile $HostLog -JoinFile $JoinLog) }
         "squad_meta_probe" { return (Test-SquadMetaProbe -HostFile $HostLog -JoinFile $JoinLog) }
         "squad_meta_probe2" { return (Test-SquadMetaProbe2 -HostFile $HostLog -JoinFile $JoinLog) }
+        "squad_meta_persist" { return (Test-SquadMetaPersist -HostFile $HostLog -JoinFile $JoinLog) }
         "connect_bootstrap" { return (Test-ConnectBootstrap -HostFile $HostLog -JoinFile $JoinLog) }
         "connect_stream"    { return (Test-ConnectStream    -HostFile $HostLog -JoinFile $JoinLog) }
         "prod_probe"     { return (Test-ProdProbe      -HostFile $HostLog -JoinFile $JoinLog) }
@@ -482,7 +483,7 @@ Export-ModuleMember -Function @(
     "Get-SpawnHands", "Test-SpawnProbe", "Test-SpawnSync", "Test-SpawnFarBind",
     "Test-NpcCensus",
     "Get-WalletSeries", "Get-PoolSeries", "Test-ShopProbe", "Test-WalletProbe",
-    "Test-MoneySync", "Test-MoneyPersist", "Test-SquadMetaProbe", "Test-SquadMetaProbe2", "Test-VendorTrade",
+    "Test-MoneySync", "Test-MoneyPersist", "Test-SquadMetaProbe", "Test-SquadMetaProbe2", "Test-SquadMetaPersist", "Test-VendorTrade",
     "Test-RecruitProbe", "Test-RecruitSync", "Test-RecruitCtl", "Test-RecruitAuthority", "Test-OwnTabReturn",
     "Get-FacRelSeries", "Test-FactionProbe", "Test-FactionSync",
     "Get-GTimeSeries", "Test-TimeProbe", "Test-TimeSync", "Get-SlewSummary",

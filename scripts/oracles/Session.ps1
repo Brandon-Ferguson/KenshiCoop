@@ -962,3 +962,65 @@ function Test-SquadMetaProbe2 {
     return (Add-GateResult -Name "squad_meta_probe2" -Status $v -Detail $detail)
 }
 
+# squad_meta_persist (protocol 72, Bug #1 step 2): does a squad name the JOIN
+# set survive the save? The host's save was the only one that lasted, so the
+# join's tab names were wiped on every load. The join renames its tab, the host
+# latches what reached it, saves and loads; the gate is that BOTH clients read
+# the join's name back after the reload:
+#   1. the join's local rename read back (SMPWRITE ok=1);
+#   2. the host LATCHED the join's name before saving (moved=1) - a run that
+#      never saw it proves nothing, so it fails;
+#   3. the coordinated save/ACK/load round trip ran (SMPSAVE/SMPACK/SMPLOAD ok=1);
+#   4. BOTH sides swapped worlds and read the join's name (SMPPOST ok=1). Coming
+#      back with the pre-rename name is the original bug reproducing.
+function Test-SquadMetaPersist {
+    param([string]$HostFile, [string]$JoinFile)
+    $why = @()
+
+    $w = Select-String -Path $JoinFile -Pattern "SCENARIO SMPWRITE name='([^']*)' readback='([^']*)' ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($null -eq $w) { $why += "join never logged its SMPWRITE" }
+    elseif ($w.Matches[0].Groups[3].Value -ne '1') { $why += "join's local rename did not read back ('$($w.Matches[0].Groups[2].Value)')" }
+
+    $latch = Select-String -Path $HostFile -Pattern "SCENARIO SMPLATCH seen='([^']*)' expect='([^']*)' start='([^']*)' moved=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    $expect = ''
+    if ($null -eq $latch) { $why += "host never latched (SMPLATCH) - the join's tab was unreadable" }
+    else {
+        $g = $latch.Matches[0].Groups
+        $expect = $g[2].Value
+        if ($g[4].Value -eq '1') { Write-Host "    FINDING: host saw the join's tab as '$($g[1].Value)' before the save (the rename reached the authority)" }
+        else { $why += "host still saw '$($g[1].Value)' at save time - the join's rename never reached the authority, so the save cannot carry it" }
+    }
+
+    foreach ($leg in @(@('SMPSAVE', 'coordinated save'), @('SMPACK', 'join save-commit ACK'), @('SMPLOAD', 'mid-session load'))) {
+        $m = Select-String -Path $HostFile -Pattern "SCENARIO $($leg[0]) .*ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $m) { $why += "host never logged its $($leg[1]) ($($leg[0]))" }
+        elseif ($m.Matches[0].Groups[1].Value -ne '1') { $why += "host $($leg[1]) failed" }
+    }
+
+    $postRe = "SCENARIO SMPPOST name='([^']*)' expect='([^']*)' start='([^']*)' ok=(\d) who=(host|join)"
+    $hostPost = ''; $joinPost = ''
+    foreach ($side in @(@($HostFile, 'host'), @($JoinFile, 'join'))) {
+        $file = $side[0]; $tag = $side[1]
+        if ($null -eq (Select-String -Path $file -Pattern 'SCENARIO SMPSWAPDONE' -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            $why += "$tag never completed its world swap (no SMPSWAPDONE)"
+        }
+        $p = Select-String -Path $file -Pattern $postRe -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $p) { $why += "$tag never logged its post-load SMPPOST"; continue }
+        $g = $p.Matches[0].Groups
+        if ($tag -eq 'host') { $hostPost = $g[1].Value } else { $joinPost = $g[1].Value }
+        if ($g[4].Value -ne '1') {
+            $tail = if ($g[1].Value -eq $g[3].Value) { " - this is the pre-rename name, the original Bug #1 wipe" } else { "" }
+            $why += "$tag came back with '$($g[1].Value)', want '$($g[2].Value)'$tail"
+        }
+    }
+    if ($hostPost -ne '' -and $joinPost -ne '' -and $hostPost -ne $joinPost) {
+        $why += "the two clients disagree post-load (host '$hostPost', join '$joinPost')"
+    }
+
+    $v = if ($why.Count -eq 0) { "PASS" } else { "FAIL" }
+    $detail = $why -join "; "
+    Write-Host "  SQUAD-META-PERSIST $v - expect='$expect' hostPost='$hostPost' joinPost='$joinPost' $detail"
+    return (Add-GateResult -Name "squad_meta_persist" -Status $v `
+                -Metrics @{ expect = $expect; hostPost = $hostPost; joinPost = $joinPost } -Detail $detail)
+}
+

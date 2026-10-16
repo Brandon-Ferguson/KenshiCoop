@@ -232,6 +232,10 @@ public:
     // Symmetric (either client may buy); first-sight sent + safety-resent by the
     // caller, so a party that buys nothing is silent after the baseline.
     void queueDeed(const DeedPacket& pkt);
+    // MAIN thread: queue a reliable squad-tab name row (protocol 72). Symmetric
+    // (each client publishes the tabs it owns); sent on change + safety-resent
+    // by the caller.
+    void queueSquadName(const SquadNamePacket& pkt);
     // MAIN thread: queue a reliable runtime-fixture identity row (protocol 55).
     // Symmetric and static (a fixture's position/template never change), so this
     // is first-sight plus a slow safety resend and idles at zero traffic.
@@ -417,6 +421,8 @@ private:
     std::vector<ResearchPacket>  outResearch_;
     // Reliable property-deed ownership rows (protocol 54). Guarded by outCs_.
     std::vector<DeedPacket>      outDeed_;
+    // Reliable squad-tab name rows (protocol 72). Guarded by outCs_.
+    std::vector<SquadNamePacket> outSquadName_;
     // Reliable runtime-fixture identity rows (protocol 55). Guarded by outCs_.
     std::vector<FixturePacket>   outFixture_;
     std::vector<BuildPlacePacket> outBuildPlace_;

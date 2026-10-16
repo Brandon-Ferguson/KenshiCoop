@@ -519,6 +519,13 @@ struct Config {
     // hatch.
     bool          deedSync;
 
+    // KENSHICOOP_SQUAD_META (default ON): squad-tab name sync (protocol 72,
+    // Bug #1) - BOTH clients publish the name of every squad tab they own on
+    // change + a safety resend, and write received names onto their copy of the
+    // peer's tabs, so the host's save keeps the join's names. "0" is the A/B
+    // switch squad_meta_persist runs to reproduce the bug.
+    bool          squadMetaSync;
+
     // KENSHICOOP_FIXTURE_SYNC (default ON): runtime-fixture identity (protocol
     // 55) - BOTH clients announce the container/machine-class fixtures near
     // their interest centers (hand + position + template) and pair each

@@ -1542,6 +1542,21 @@
             Tier = 'probe'; WanVariant = $false
         }
 
+        # squad_meta_persist: the regression gate for the squad-name half of Bug
+        # #1 (protocol 72). The JOIN renames its own squad tab, the host latches
+        # the name it sees for that tab (recording whether the rename arrived),
+        # then coordinated-saves and loads mid-session. Gates that BOTH clients
+        # read the join's name back after the reload; coming back with the old
+        # name IS the bug, which KENSHICOOP_SQUAD_META=0 reproduces. clock_sync
+        # is not gated (the load restarts the clock series), as for money_persist.
+        squad_meta_persist = @{
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'squad_meta_persist'
+            Gating   = @('squad_meta_persist')
+            Advisory = @('smoothness', 'anim_truth', 'march', 'clock_sync')
+            Tier = 'full'; WanVariant = $false
+        }
+
         # bootstrap_stream: the missing-save "seamless join" proof (protocol
         # 31/32). NOT a run_test tier member and NOT run_test-drivable - it needs
         # the join-from-MENU launch (join has NO save, goes ONLINE, host bakes +

@@ -417,6 +417,8 @@ void NetLink::queueResearch(const ResearchPacket& pkt) { pushLocked(outCs_, outR
 
 void NetLink::queueDeed(const DeedPacket& pkt) { pushLocked(outCs_, outDeed_, pkt); }
 
+void NetLink::queueSquadName(const SquadNamePacket& pkt) { pushLocked(outCs_, outSquadName_, pkt); }
+
 void NetLink::queueFixture(const FixturePacket& pkt) { pushLocked(outCs_, outFixture_, pkt); }
 
 
@@ -1261,6 +1263,14 @@ void NetLink::threadLoop() {
                         if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &dep)
                             && inbound_) {
                             inbound_->pushDeed(dep.ownerId, dep);
+                        }
+                    } else if (type == PKT_SQUAD_NAME) {
+                        // Reliable squad-tab name (protocol 72): symmetric,
+                        // applied onto tabs this client does not own.
+                        SquadNamePacket snp;
+                        if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &snp)
+                            && inbound_) {
+                            inbound_->pushSquadName(snp.ownerId, snp);
                         }
                     } else if (!isHost_ && type == PKT_PLAYER_ROSTER) {
                         // The player roster (protocol 56), host -> everyone. This
@@ -2188,6 +2198,25 @@ void NetLink::threadLoop() {
         LeaveCriticalSection(&outCs_);
         for (size_t i = 0; i < deedPkts.size(); ++i) {
             ENetPacket* out = enet_packet_create(&deedPkts[i], sizeof(DeedPacket),
+                                                 ENET_PACKET_FLAG_RELIABLE);
+            if (isHost_) {
+                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+            } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+                enet_peer_send(serverPeer_, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+
+        // Drain + send any queued squad-tab name rows on CH_RELIABLE (protocol
+        // 72). SYMMETRIC - each client publishes the tabs it owns; the host's
+        // generic relay forwards a join's row to the other joins.
+        std::vector<SquadNamePacket> squadNamePkts;
+        EnterCriticalSection(&outCs_);
+        squadNamePkts.swap(outSquadName_);
+        LeaveCriticalSection(&outCs_);
+        for (size_t i = 0; i < squadNamePkts.size(); ++i) {
+            ENetPacket* out = enet_packet_create(&squadNamePkts[i], sizeof(SquadNamePacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
                 enet_host_broadcast(enetHost_, CH_RELIABLE, out);

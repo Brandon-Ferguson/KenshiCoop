@@ -21,12 +21,13 @@ typedef float          f32;
 typedef double         f64;
 
 // Protocol version is checked at handshake; a mismatch is rejected (no back-compat).
-// Public 70 carries complete bag transfers and exact merchant stock/template state.
+// Public 72 adds PKT_SQUAD_NAME (squad-tab names, Bug #1) to 70's complete bag
+// transfers and exact merchant stock/template state.
 #ifdef KENSHICOOP_NET_DIAG
-// Private 71 additionally carries bounded, reliable join-log chunks.
-const u16 PROTOCOL_VERSION = 71;
+// Private 73 additionally carries bounded, reliable join-log chunks.
+const u16 PROTOCOL_VERSION = 73;
 #else
-const u16 PROTOCOL_VERSION = 70;
+const u16 PROTOCOL_VERSION = 72;
 #endif
 
 // RELEASE id - a different axis from PROTOCOL_VERSION, and the two are routinely
@@ -104,6 +105,7 @@ enum PacketType {
     PKT_DEED             = 47,// RELIABLE property-ownership row (protocol 54); DeedPacket
     PKT_FIXTURE          = 48,// RELIABLE runtime-fixture identity row (protocol 55); FixturePacket
     PKT_PLAYER_ROSTER    = 49, // RELIABLE display-name table (host -> all, protocol 56); RosterPacket
+    PKT_SQUAD_NAME       = 50, // RELIABLE owner-published squad-tab name (protocol 72); SquadNamePacket
 #ifdef KENSHICOOP_NET_DIAG
     PKT_DEBUG_LOG_FILE   = 250 // private JOIN -> HOST local-log byte stream
 #endif
@@ -1220,6 +1222,26 @@ struct RosterPacket {
 // Optional byte after this unchanged prefix: accepted-member mask (bit id).
 // Distinguishes unnamed connected players from vacant slots. Old readers
 // consume the prefix; new readers use names only when the tail is absent.
+
+// ---- Protocol 72: squad-tab name (Bug #1, docs/design/bug1-squad-meta.md) ----
+// The join's squad names never reached the host, so the host's save - the only
+// one that survives - restored the old names on every load. ONE writer per
+// tab: the client that owns it (the ownership-rank partition) publishes its
+// current name on change plus a safety resend; every other client writes it
+// onto its own copy of that tab, so the host's save carries it.
+//
+// The tab is keyed by the hand CONTAINER of its members (container +
+// containerSerial) - the identity the ownership partition already ranks by,
+// measured equal on both sides by squad_meta_probe. Symmetric (both sides
+// publish their own tabs); the host relays a join's row to the other joins.
+struct SquadNamePacket {
+    u8  type;            // = PKT_SQUAD_NAME
+    u32 ownerId;         // network player id of the sender (the tab's owner)
+    u32 seq;             // per-sender monotonic (stale-row guard)
+    u32 container;       // member hand container of the tab
+    u32 containerSerial; // member hand containerSerial of the tab
+    char name[64];       // NUL-terminated; '' = unreadable, never applied
+};
 
 #ifdef KENSHICOOP_NET_DIAG
 // Private log mirror on the bulk channel, distinct from the live game-event

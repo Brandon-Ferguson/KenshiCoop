@@ -565,6 +565,22 @@ public:
     // Property-deed sync master enable (KENSHICOOP_DEED_SYNC).
     void setDeedSync(bool v) { deedSync_ = v; }
 
+    // BEFORE engine (protocol 72, BOTH clients, Bug #1): sample the name of
+    // every squad tab THIS client owns (~1 Hz, one representative member per
+    // tab from ownHands_) and publish one PKT_SQUAD_NAME row per tab on change
+    // plus a safety resend. Only owned tabs are published, so a name we wrote
+    // onto a peer's tab can never echo back.
+    void publishSquadNames(const SyncContext& ctx);
+
+    // BEFORE engine (protocol 72): drain received tab names and write each onto
+    // our copy of that tab through any local member (allSquad_). Never writes a
+    // tab we own. A tab with no member resolvable here stays pending - the
+    // sender's safety resend retries it.
+    void applySquadNames(const SyncContext& ctx);
+
+    // Squad-tab name sync master enable (KENSHICOOP_SQUAD_META).
+    void setSquadMetaSync(bool v) { squadMetaSync_ = v; }
+
     // AFTER engine (protocol 55): announce the container/machine-class fixtures
     // near our interest centers so the peer can pair our hand for each with its
     // own copy. Rows are STATIC (position + template), so this is first-sight
@@ -2146,6 +2162,26 @@ private:
     unsigned long deedSampleMs_;
     unsigned long deedAuditMs_; // last wide-state dump (owner-vs-peer diff)
     bool          deedSync_;
+    // Protocol 72 squad-tab names (Bug #1). A tab is keyed by its members' hand
+    // container + containerSerial. Out rows are the tabs we own (what we last
+    // sent); in rows are peers' tabs (stale-row guard per sender).
+    typedef std::pair<u32, u32> TabKey;
+    struct SquadNameOut {
+        std::string   sent;
+        unsigned long lastSendMs;
+        SquadNameOut() : lastSendMs(0) {}
+    };
+    struct SquadNameIn {
+        u32         ownerId;
+        u32         seqSeen;
+        std::string pending; // last name logged as unresolvable (log once)
+        SquadNameIn() : ownerId(0), seqSeen(0) {}
+    };
+    std::map<TabKey, SquadNameOut> squadNameOut_;
+    std::map<TabKey, SquadNameIn>  squadNameIn_;
+    u32           squadNameSeqOut_;
+    unsigned long squadNameSampleMs_;
+    bool          squadMetaSync_;
     // Protocol 55 runtime-fixture identity. A mine is instantiated per client
     // for a terrain node, so the same physical fixture has a different hand on
     // each side; without a pairing the pose inject resolves nothing (the miner

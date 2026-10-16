@@ -123,6 +123,7 @@ static void testSizes() {
     CHECK_EQ("sizeof(ResearchPacket)",          sizeof(ResearchPacket),          57); // v37: research
     CHECK_EQ("sizeof(DeedPacket)",              sizeof(DeedPacket),              78); // v54: deeds
     CHECK_EQ("sizeof(FixturePacket)",           sizeof(FixturePacket),           90); // v55: fixture identity
+    CHECK_EQ("sizeof(SquadNamePacket)",         sizeof(SquadNamePacket),         81); // v72: squad-tab name
     CHECK_EQ("sizeof(CamHintPacket)",           sizeof(CamHintPacket),           17); // v43: camera hint
     CHECK_EQ("sizeof(CellClaimPacket)",         sizeof(CellClaimPacket),         21); // v49: cell claim
     CHECK_EQ("sizeof(InvXferAckPacket)",        sizeof(InvXferAckPacket),        20); // v66: +authoritative bag framing
@@ -325,6 +326,10 @@ static void testSizes() {
     // Protocol 56 (v59): the roster table. One row carries EVERY name, so a
     // receiver can never be handed half a table, and the tag must not collide
     // with the fixture row that preceded it.
+    // Protocol 72 (Bug #1): squad-tab names take the next free tag.
+    CHECK_EQ("PKT_SQUAD_NAME id", (int)PKT_SQUAD_NAME, 50);
+    CHECK("PKT_SQUAD_NAME distinct", PKT_SQUAD_NAME != PKT_PLAYER_ROSTER &&
+          PKT_SQUAD_NAME != PKT_FIXTURE && PKT_SQUAD_NAME != PKT_DEED);
     CHECK_EQ("PKT_PLAYER_ROSTER id", (int)PKT_PLAYER_ROSTER, 49);
     CHECK("PKT_PLAYER_ROSTER distinct", PKT_PLAYER_ROSTER != PKT_FIXTURE &&
           PKT_PLAYER_ROSTER != PKT_DEED && PKT_PLAYER_ROSTER != PKT_HELLO);
@@ -520,6 +525,7 @@ static void testRoundTrips() {
     roundTrip<ResearchPacket>("ResearchPacket", (u8)PKT_RESEARCH);
     roundTrip<DeedPacket>("DeedPacket", (u8)PKT_DEED);
     roundTrip<FixturePacket>("FixturePacket", (u8)PKT_FIXTURE);
+    roundTrip<SquadNamePacket>("SquadNamePacket", (u8)PKT_SQUAD_NAME);
     roundTrip<CellClaimPacket>("CellClaimPacket", (u8)PKT_CELL_CLAIM);
     roundTrip<InvXferAckPacket>("InvXferAckPacket", (u8)PKT_INV_XFER_ACK);
 

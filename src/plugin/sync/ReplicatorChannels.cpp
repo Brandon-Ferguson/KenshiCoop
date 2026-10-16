@@ -1473,6 +1473,113 @@ void Replicator::applyDeeds(const SyncContext& ctx) {
     }
 }
 
+// ---- Protocol 72: squad-tab names (Bug #1) ----------------------------------
+// See the SquadNamePacket comment in Wire.h and docs/design/bug1-squad-meta.md.
+// squad_meta_probe measured the two facts this rests on: a tab's member hand
+// container is identical on both sides, and ActivePlatoon::setName persists
+// through the host's save.
+
+void Replicator::publishSquadNames(const SyncContext& ctx) {
+    NetLink& net = *ctx.net; u32 ownerId = ctx.localId;
+    if (!squadMetaSync_) return;
+    const unsigned long SAMPLE_MS = tuning_.squadNameSampleMs;
+    const unsigned long RESEND_MS = tuning_.squadNameResendMs;
+    unsigned long now = nowMs();
+    if (!sync::gateSampleDue(now, squadNameSampleMs_, SAMPLE_MS)) return;
+    squadNameSampleMs_ = now;
+
+    // One representative member per OWNED tab; any member reads the same
+    // ActivePlatoon name.
+    std::map<TabKey, Key> tabs;
+    for (std::set<Key>::const_iterator it = ownHands_.begin(); it != ownHands_.end(); ++it)
+        tabs.insert(std::make_pair(TabKey(it->c, it->cs), *it));
+
+    for (std::map<TabKey, Key>::const_iterator it = tabs.begin(); it != tabs.end(); ++it) {
+        const Key& k = it->second;
+        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        if (!c) continue;
+        char nm[sizeof(((SquadNamePacket*)0)->name)];
+        if (!engine::squadNameOf(c, nm, sizeof(nm)) || !nm[0]) continue;
+        SquadNameOut& o = squadNameOut_[it->first];
+        bool changed = (o.sent != nm);
+        if (!sync::gateShouldSend(changed, now, o.lastSendMs, /*minSendMs*/ 0,
+                                  RESEND_MS, /*resendUnsent*/ true))
+            continue;
+        o.sent = nm; o.lastSendMs = now;
+        SquadNamePacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type            = (u8)PKT_SQUAD_NAME;
+        pkt.ownerId         = ownerId;
+        pkt.seq             = squadNameSeqOut_++;
+        pkt.container       = it->first.first;
+        pkt.containerSerial = it->first.second;
+        strncpy(pkt.name, nm, sizeof(pkt.name) - 1);
+        net.queueSquadName(pkt);
+        if (changed) { // resends stay silent; the new name is the signal
+            char b[160];
+            _snprintf(b, sizeof(b) - 1, "[squadname] SEND tab=%u.%u name='%s' seq=%u",
+                      pkt.container, pkt.containerSerial, pkt.name, pkt.seq);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+}
+
+void Replicator::applySquadNames(const SyncContext& ctx) {
+    Inbound& in = *ctx.in;
+    std::deque<InboundSquadName> got;
+    in.drainSquadName(got);
+    if (got.empty()) return;
+    if (!squadMetaSync_) return;
+    for (std::deque<InboundSquadName>::iterator it = got.begin(); it != got.end(); ++it) {
+        const SquadNamePacket& p = it->pkt;
+        char nm[sizeof(p.name) + 1];
+        memcpy(nm, p.name, sizeof(p.name));
+        nm[sizeof(p.name)] = '\0';
+        if (!nm[0]) continue;
+        TabKey tab(p.container, p.containerSerial);
+
+        // Never write a tab we own: our own name is the authority for it.
+        bool own = false;
+        for (std::set<Key>::const_iterator k = ownHands_.begin(); k != ownHands_.end(); ++k)
+            if (k->c == tab.first && k->cs == tab.second) { own = true; break; }
+        if (own) continue;
+
+        SquadNameIn& r = squadNameIn_[tab];
+        if (r.ownerId != it->ownerId) { r.ownerId = it->ownerId; r.seqSeen = 0; }
+        if (!sync::gateSeqAccept(r.seqSeen, p.seq)) continue; // stale/dup row
+        r.seqSeen = p.seq;
+
+        Character* c = 0;
+        for (std::set<Key>::const_iterator k = allSquad_.begin();
+             k != allSquad_.end() && !c; ++k)
+            if (k->c == tab.first && k->cs == tab.second)
+                c = engine::resolveCharByHand(k->i, k->s, k->t, k->c, k->cs);
+        if (!c) {
+            // No member of that tab resolves here yet; the sender's safety
+            // resend retries. Logged once per name, not once per resend.
+            if (r.pending != nm) {
+                r.pending = nm;
+                char b[176];
+                _snprintf(b, sizeof(b) - 1,
+                          "[squadname] UNRESOLVED tab=%u.%u from=%u name='%s' seq=%u",
+                          tab.first, tab.second, it->ownerId, nm, p.seq);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            continue;
+        }
+        r.pending.clear();
+        char cur[sizeof(p.name) + 1];
+        engine::squadNameOf(c, cur, sizeof(cur));
+        if (strcmp(cur, nm) == 0) continue; // converged (resend, or the save)
+        bool ok = engine::setSquadNameOf(c, nm);
+        char b[224];
+        _snprintf(b, sizeof(b) - 1,
+                  "[squadname] APPLY tab=%u.%u from=%u name='%s' was='%s' ok=%d seq=%u",
+                  tab.first, tab.second, it->ownerId, nm, cur, ok ? 1 : 0, p.seq);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+}
+
 // ---- Protocol 55: runtime-fixture identity ----------------------------------
 // See the FixturePacket comment in Wire.h for the measurement that motivates
 // this channel (the same mine carrying hand 50.2399902464 on the host and
@@ -1911,7 +2018,8 @@ void Replicator::driveSampledChannels(const SyncContext& ctx) {
         { &Replicator::fixtureSync_,  0,                     &Replicator::publishFixtures,   &Replicator::applyFixtures,   false },
         { &Replicator::prodSync_,     0,                     &Replicator::publishProd,       &Replicator::applyProd,       true  },
         { &Replicator::researchSync_, 0,                     &Replicator::publishResearch,   &Replicator::applyResearch,   true  },
-        { &Replicator::deedSync_,     0,                     &Replicator::publishDeeds,      &Replicator::applyDeeds,      false }
+        { &Replicator::deedSync_,     0,                     &Replicator::publishDeeds,      &Replicator::applyDeeds,      false },
+        { &Replicator::squadMetaSync_, 0,                    &Replicator::publishSquadNames, &Replicator::applySquadNames, false }
     };
     const int n = (int)(sizeof(kCh) / sizeof(kCh[0]));
     for (int i = 0; i < n; ++i) {
@@ -2009,6 +2117,12 @@ void Replicator::onPeerConnected(NetLink& net, u32 ownerId) {
     for (std::map<Key, DeedRow>::iterator it = deedRows_.begin();
          it != deedRows_.end(); ++it)
         if (it->second.lastSendMs != 0) { it->second.lastSendMs = 1; ++nDeed; }
+    // Squad-tab names (protocol 72): same ageing, so the newcomer learns our
+    // tab names on the next sample. Not added to the RESYNC line below - its
+    // format is parsed by the oracles.
+    for (std::map<TabKey, SquadNameOut>::iterator it = squadNameOut_.begin();
+         it != squadNameOut_.end(); ++it)
+        if (it->second.lastSendMs != 0) it->second.lastSendMs = 1;
 
     char b[240];
     _snprintf(b, sizeof(b) - 1,

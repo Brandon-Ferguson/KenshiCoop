@@ -1,7 +1,7 @@
 // ScenarioSession.cpp - session lifecycle scenarios (monolith split from
 // Scenario.cpp, 2026-07-12): latejoin_probe/latejoin_sync, save_probe,
 // save_sync/save_stage1, resume_check, load_probe, load_sync, money_persist,
-// squad_meta_probe/squad_meta_probe2. Classes are
+// squad_meta_probe/squad_meta_probe2, squad_meta_persist. Classes are
 // TU-private (anonymous namespace); only makeSessionScenario
 // (ScenarioSupport.h) is exported.
 // Must NOT: change any SCENARIO log string (oracle API, resources/CODE_MAP.md).
@@ -1339,6 +1339,29 @@ private:
 };
 const char* const MoneyPersistScenario::SAVE_NAME = "coopresume";
 
+// ---- Bug #1 shared helpers (squad_meta_probe*, squad_meta_persist) ----------
+// printf-style SCENARIO line.
+void smLog(const char* fmt, ...) {
+    char b[320];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf(b, sizeof(b) - 1, fmt, ap);
+    va_end(ap);
+    b[sizeof(b) - 1] = '\0';
+    coop::logLine(b);
+}
+
+// Leader of squad tab 'rank' (the replicator's ownership ranks), or 0.
+// Re-captured on every call: no Character* survives a tick (pitfalls §15).
+Character* tabLeader(const ScenarioContext& ctx, unsigned int rank) {
+    const unsigned int MAX_SQUAD = 32;
+    EntityState sq[MAX_SQUAD];
+    unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_SQUAD);
+    int idx = tabLeaderIdx(sq, n, rank);
+    if (idx < 0) return 0;
+    return engine::resolve(sq[idx]);
+}
+
 // squad_meta_probe (Bug #1 step 1, probe tier; loadSync + saveSync ON; no
 // protocol change). Reports, rather than gates, the four open questions in
 // docs/design/bug1-squad-meta.md before any channel is written:
@@ -1557,25 +1580,6 @@ public:
     }
 
 private:
-    static void smLog(const char* fmt, ...) {
-        char b[320];
-        va_list ap;
-        va_start(ap, fmt);
-        _vsnprintf(b, sizeof(b) - 1, fmt, ap);
-        va_end(ap);
-        b[sizeof(b) - 1] = '\0';
-        coop::logLine(b);
-    }
-
-    // Leader of squad tab 'rank' (the replicator's ownership ranks), or 0.
-    static Character* tabLeader(const ScenarioContext& ctx, unsigned int rank) {
-        EntityState sq[MAX_SQUAD];
-        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_SQUAD);
-        int idx = tabLeaderIdx(sq, n, rank);
-        if (idx < 0) return 0;
-        return engine::resolve(sq[idx]);
-    }
-
     // One SMTAB per squad tab, one SMJOBS per tab leader, one SMFACTION.
     static void census(const ScenarioContext& ctx, const char* phase) {
         const char* who = ctx.isHost ? "host" : "join";
@@ -1728,6 +1732,173 @@ const int SquadMetaProbeScenario::ORDER_JOBS[SquadMetaProbeScenario::ORDER_JOB_C
     (int)JOB_MEDIC, (int)JOB_REPAIR_ROBOT, (int)JOB_KEEP_EVERYTHING_RUNNING
 };
 
+// squad_meta_persist (Bug #1 step 2, full tier; loadSync + saveSync ON): the
+// regression gate for the squad-name half of Bug #1, modelled on money_persist.
+//   * join t=8s: rename its OWN tab (rank 1) and read it back.
+//   * host: watch its copy of that tab from t=8s; latch what it sees at the
+//     first match or at t=18s, recording moved=0|1 - latching regardless is
+//     what lets the KENSHICOOP_SQUAD_META=0 negative control reach the
+//     post-load assertion instead of stalling before the save (pitfalls §16
+//     corollary). Then coordinated save -> this save's ACK -> load.
+//   * both, post-swap: tab 1 must read the join's name. Reading the host's old
+//     name instead IS the original bug.
+class SquadMetaPersistScenario : public TimedScenario {
+public:
+    SquadMetaPersistScenario()
+        : TimedScenario("squad_meta_persist", /*evidenceMs=*/0),
+          writeDone_(false), writeOk_(false), latched_(false), moved_(false),
+          ackBase_(0), saveIssued_(false), saveOk_(false), ackSeen_(false),
+          ackOk_(false), loadIssued_(false), loadOk_(false), sigWas2_(false),
+          swapDone_(false), checked_(false), postOk_(false),
+          lastWatchMs_(0), dropStartMs_(0), sigClearedMs_(0), checkAtMs_(0),
+          lastStatusMs_(0) {
+        startName_[0] = '\0';
+    }
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        Character* c = tabLeader(ctx, JOIN_RANK);
+        if (!c || !engine::squadNameOf(c, startName_, sizeof(startName_)))
+            startName_[0] = '\0';
+        smLog("SCENARIO SMPSTART host=%d tab1='%s'", ctx.isHost ? 1 : 0, startName_);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        bool live = engine::gameplayLive(ctx.gw);
+        const char* who = ctx.isHost ? "host" : "join";
+
+        // ---- Join: rename its own tab ------------------------------------
+        if (!ctx.isHost && !writeDone_ && live && ctx.elapsedMs >= WRITE_AT_MS) {
+            writeDone_ = true;
+            Character* c = tabLeader(ctx, JOIN_RANK);
+            bool ok = c && engine::setSquadNameOf(c, NEW_NAME);
+            char rb[72]; rb[0] = '\0';
+            if (c) engine::squadNameOf(c, rb, sizeof(rb));
+            writeOk_ = ok && strcmp(rb, NEW_NAME) == 0;
+            smLog("SCENARIO SMPWRITE name='%s' readback='%s' ok=%d t=%lu",
+                  NEW_NAME, rb, writeOk_ ? 1 : 0, ctx.elapsedMs);
+        }
+
+        // ---- Host: latch what reached it, then save + load ----------------
+        if (ctx.isHost) {
+            if (!latched_ && live && ctx.elapsedMs >= WRITE_AT_MS &&
+                ctx.elapsedMs - lastWatchMs_ >= 1000) {
+                lastWatchMs_ = ctx.elapsedMs;
+                Character* c = tabLeader(ctx, JOIN_RANK);
+                char seen[72]; seen[0] = '\0';
+                if (c) engine::squadNameOf(c, seen, sizeof(seen));
+                bool match = strcmp(seen, NEW_NAME) == 0;
+                if (match || ctx.elapsedMs >= LATCH_DEADLINE_MS) {
+                    latched_ = true;
+                    moved_ = match;
+                    smLog("SCENARIO SMPLATCH seen='%s' expect='%s' start='%s' "
+                          "moved=%d t=%lu", seen, NEW_NAME, startName_,
+                          moved_ ? 1 : 0, ctx.elapsedMs);
+                }
+            }
+            if (latched_ && !saveIssued_ && live) {
+                saveIssued_ = true;
+                ackBase_ = savexfer::lastAckXferId();
+                saveOk_ = engine::saveGameAs(SAVE_NAME);
+                smLog("SCENARIO SMPSAVE name='%s' ok=%d ackBase=%u t=%lu", SAVE_NAME,
+                      saveOk_ ? 1 : 0, (unsigned)ackBase_, ctx.elapsedMs);
+            }
+            if (saveIssued_ && !ackSeen_ &&
+                savexfer::lastAckXferId() != 0 &&
+                savexfer::lastAckXferId() != ackBase_) {
+                ackSeen_ = true;
+                ackOk_ = (savexfer::lastAckOk() == 1);
+                smLog("SCENARIO SMPACK ok=%d t=%lu", ackOk_ ? 1 : 0, ctx.elapsedMs);
+            }
+            if (ackSeen_ && ackOk_ && !loadIssued_ && live) {
+                loadIssued_ = true;
+                loadOk_ = engine::loadSave(SAVE_NAME);
+                smLog("SCENARIO SMPLOAD name='%s' ok=%d t=%lu", SAVE_NAME,
+                      loadOk_ ? 1 : 0, ctx.elapsedMs);
+            }
+        }
+
+        // ---- Both: world-swap detection (same as money_persist) ------------
+        if (!live && dropStartMs_ == 0) {
+            dropStartMs_ = ctx.elapsedMs;
+        } else if (live && dropStartMs_ != 0) {
+            unsigned long ms = ctx.elapsedMs - dropStartMs_;
+            dropStartMs_ = 0;
+            if (ms >= SWAP_MIN_MS && !swapDone_) {
+                swapDone_ = true;
+                checkAtMs_ = ctx.elapsedMs + SETTLE_MS;
+                smLog("SCENARIO SMPSWAPDONE swapMs=%lu t=%lu", ms, ctx.elapsedMs);
+            }
+        }
+        {
+            int sig = engine::saveMgrSignal(0);
+            if (sig == 2) { sigWas2_ = true; sigClearedMs_ = 0; }
+            else if (sigWas2_ && sigClearedMs_ == 0) sigClearedMs_ = ctx.elapsedMs;
+            if (!swapDone_ && sigWas2_ && sigClearedMs_ != 0 && live &&
+                dropStartMs_ == 0 &&
+                ctx.elapsedMs >= sigClearedMs_ + SYNC_CONFIRM_MS) {
+                swapDone_ = true;
+                checkAtMs_ = ctx.elapsedMs + SETTLE_MS;
+                smLog("SCENARIO SMPSWAPDONE t=%lu (synchronous inside execute)",
+                      ctx.elapsedMs);
+            }
+        }
+
+        // ---- Both: did the join's name survive the reload? ---------------
+        if (swapDone_ && !checked_ && live && ctx.elapsedMs >= checkAtMs_) {
+            checked_ = true;
+            Character* c = tabLeader(ctx, JOIN_RANK);
+            char post[72]; post[0] = '\0';
+            if (c) engine::squadNameOf(c, post, sizeof(post));
+            postOk_ = strcmp(post, NEW_NAME) == 0;
+            smLog("SCENARIO SMPPOST name='%s' expect='%s' start='%s' ok=%d who=%s t=%lu",
+                  post, NEW_NAME, startName_, postOk_ ? 1 : 0, who, ctx.elapsedMs);
+        }
+
+        if (ctx.elapsedMs - lastStatusMs_ >= 5000) {
+            lastStatusMs_ = ctx.elapsedMs;
+            smLog("SCENARIO SMPSTATE write=%d latch=%d moved=%d save=%d ack=%d "
+                  "load=%d swap=%d post=%d live=%d t=%lu", writeOk_ ? 1 : 0,
+                  latched_ ? 1 : 0, moved_ ? 1 : 0, saveOk_ ? 1 : 0, ackOk_ ? 1 : 0,
+                  loadOk_ ? 1 : 0, swapDone_ ? 1 : 0, postOk_ ? 1 : 0, live ? 1 : 0,
+                  ctx.elapsedMs);
+        }
+
+        bool localDone = ctx.isHost
+            ? (saveOk_ && ackOk_ && loadOk_ && checked_)
+            : (writeDone_ && checked_);
+        if ((localDone && ctx.elapsedMs >= checkAtMs_ + TAIL_HOLD_MS) ||
+            ctx.elapsedMs >= DURATION_MS) {
+            setPassed(ctx.isHost
+                ? (moved_ && saveOk_ && ackOk_ && loadOk_ && swapDone_ && postOk_)
+                : (writeOk_ && swapDone_ && postOk_));
+            return true;
+        }
+        return false;
+    }
+
+private:
+    static const unsigned int  JOIN_RANK         = 1;
+    static const unsigned long WRITE_AT_MS       = 8000;
+    static const unsigned long LATCH_DEADLINE_MS = 18000;
+    static const unsigned long SWAP_MIN_MS       = 400;
+    static const unsigned long SYNC_CONFIRM_MS   = 3000;
+    static const unsigned long SETTLE_MS         = 5000;
+    static const unsigned long TAIL_HOLD_MS      = 8000;
+    static const unsigned long DURATION_MS       = 110000;
+
+    char          startName_[72];
+    bool          writeDone_, writeOk_, latched_, moved_;
+    u32           ackBase_; // lastAckXferId() when our save was issued
+    bool          saveIssued_, saveOk_, ackSeen_, ackOk_;
+    bool          loadIssued_, loadOk_, sigWas2_, swapDone_, checked_, postOk_;
+    unsigned long lastWatchMs_, dropStartMs_, sigClearedMs_, checkAtMs_, lastStatusMs_;
+
+    static const char* const SAVE_NAME;
+    static const char* const NEW_NAME;
+};
+const char* const SquadMetaPersistScenario::SAVE_NAME = "coopresume";
+const char* const SquadMetaPersistScenario::NEW_NAME  = "SMPersist Join Squad";
+
 } // namespace
 
 Scenario* makeSessionScenario(const std::string& name) {
@@ -1742,6 +1913,7 @@ Scenario* makeSessionScenario(const std::string& name) {
     if (name == "money_persist")  return new MoneyPersistScenario();
     if (name == "squad_meta_probe")  return new SquadMetaProbeScenario(false);
     if (name == "squad_meta_probe2") return new SquadMetaProbeScenario(true);
+    if (name == "squad_meta_persist") return new SquadMetaPersistScenario();
     return 0;
 }
 
