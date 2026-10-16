@@ -1,6 +1,6 @@
 # Bug #1 design: joiner squad names, faction name and jobs survive the save
 
-Status: **probes done (steps 1 and 1b); step 2 (squad names) implemented, not yet run in game** —
+Status: **step 2 (squad names) passes in game; step 3 (faction name) in progress** —
 October 16, 2026.
 Bug source: nhoral/KenshiCoop issue #74; docs/PROJECT_BRIEF.md bug table row 1.
 
@@ -165,7 +165,7 @@ Verdict PASS (`squad_meta_probe2` primary); advisory `march` FAIL as before.
 All open questions are answered except the mid-session new squad tab, which
 step 2 covers.
 
-## Step 2: squad names (implemented, not yet run in game)
+## Step 2: squad names (implemented; gate passes in game)
 
 - `PKT_SQUAD_NAME` = 50, 81 bytes; protocol 72 public / 73 diagnostic.
 - `Replicator::publishSquadNames` / `applySquadNames`, a symmetric row in
@@ -179,6 +179,17 @@ step 2 covers.
   resend retries).
 - Gate: `squad_meta_persist` (full tier) + `Test-SquadMetaPersist`; the A/B
   negative control is `KENSHICOOP_SQUAD_META=0`.
+
+In-game A/B (Harness, local two-client loopback, save `sync`):
+
+| Run | Channel | Verdict | What happened |
+|---|---|---|---|
+| `20261016_155913` | on | **PASS** | Join renamed tab `7.2303466752` to `SMPersist Join Squad` at 8.0 s and sent it; the host logged `APPLY ... was='Nameless_1' ok=1` within a second, latched it at 9.0 s (`moved=1`), saved, got the ACK at 13.3 s and loaded. Both sides read `SMPersist Join Squad` after reload. |
+| `20261016_160200` | off (`KENSHICOOP_SQUAD_META=0`, confirmed in both logs' `off=[...]`) | **FAIL** (intended) | Same rename on the join; the host still saw `Nameless_1` at its 18 s deadline (`moved=0`), saved and loaded; both sides read `Nameless_1` after reload — the original Bug #1 wipe, named as such by the oracle. |
+
+The switch alone decides whether the join's tab name survives, so the channel
+is the fix and the gate detects a regression. No `UNRESOLVED` lines, health
+PASS on both sides in both runs.
 
 Known limits:
 - A rename made within about one sample (~1 s) plus a round trip before the
@@ -197,7 +208,7 @@ Known limits:
    change. **Done** (results above).
 1b. **Follow-up probe `squad_meta_probe2`** — which faction field the save
    keeps, and whether clear + re-add preserves the order of 2+ jobs. **Done.**
-2. Squad names end to end + gate (`PKT_SQUAD_NAME`, protocol bump). **Implemented.**
+2. Squad names end to end + gate (`PKT_SQUAD_NAME`, protocol bump). **Done; gate passes in game.**
 3. Faction rename op channel.
 4. Jobs, including subject translation and parking.
 5. Update docs/PROJECT_BRIEF.md's bug table only after a real two-player session.
