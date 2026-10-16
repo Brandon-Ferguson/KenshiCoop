@@ -1,6 +1,6 @@
 # Bug #1 design: joiner squad names, faction name and jobs survive the save
 
-Status: **step 2 (squad names) passes in game; step 3 (faction name) implemented, not yet run in game** —
+Status: **steps 2 (squad names) and 3 (faction name) pass in game; step 4 (jobs) in progress** —
 October 16, 2026.
 Bug source: nhoral/KenshiCoop issue #74; docs/PROJECT_BRIEF.md bug table row 1.
 
@@ -201,7 +201,7 @@ Known limits:
   `UNRESOLVED` and keeps retrying. Not yet measured.
 - Whether the squad bar redraws a renamed tab without a reload is not measured.
 
-## Step 3: faction name (implemented, not yet run in game)
+## Step 3: faction name (implemented; gate passes in game)
 
 - `PKT_FACTION_RENAME` = 51 (73 bytes, join → host, **not relayed**) and
   `PKT_FACTION_NAME` = 52 (89 bytes, host → all, per-player `ackSeq[4]`).
@@ -232,6 +232,17 @@ Known limits: a rename within about a second of the host's save can miss that
 save (as for squad names); two renames from different players inside one
 round trip resolve to whichever the host folds last.
 
+In-game A/B (Harness, local two-client loopback, save `sync`; the gate now
+covers the squad name and the faction name together):
+
+| Run | Channel | Verdict | What happened |
+|---|---|---|---|
+| `20261016_162442` | on | **PASS** | Both seeded `Nameless`. At 8.0 s the join renamed the faction (displayed field only, like the UI); its channel wrote the saved field (`saveField=1`) and sent `RENAME seq=1`. The host logged `FOLD from=1 seq=1 ... was='Nameless' ok=1` and broadcast the total with `ack=0,1,0,0`; the join logged `ACK seq=1`. The host latched both names at 9.0 s (`moved=1` twice), saved and loaded. After reload both sides re-seeded from `SMPersist Join Faction` and held it in **both** fields; the squad name also survived on both sides. |
+| `20261016_162725` | off (`off=[...]` in both logs; no `[facname]` lines) | **FAIL** (intended) | Same renames on the join, both read back. At the 18 s deadline the host still saw `Nameless_1` / `Nameless` (`moved=0` twice), saved and loaded; both sides came back `Nameless_1` and `Nameless` in both faction fields — the Bug #1 wipe for each name. |
+
+The switch alone decides whether the join's squad and faction names survive.
+Health PASS on both sides in both runs.
+
 ## Steps (branch `fix/squad-meta-persist`, one commit each)
 
 1. **Probe scenario `squad_meta_probe`** — read/write each value on own tabs,
@@ -240,7 +251,7 @@ round trip resolve to whichever the host folds last.
 1b. **Follow-up probe `squad_meta_probe2`** — which faction field the save
    keeps, and whether clear + re-add preserves the order of 2+ jobs. **Done.**
 2. Squad names end to end + gate (`PKT_SQUAD_NAME`, protocol bump). **Done; gate passes in game.**
-3. Faction rename op channel (`PKT_FACTION_RENAME` / `PKT_FACTION_NAME`). **Implemented.**
+3. Faction rename op channel (`PKT_FACTION_RENAME` / `PKT_FACTION_NAME`). **Done; gate passes in game.**
 4. Jobs, including subject translation and parking.
 5. Update docs/PROJECT_BRIEF.md's bug table only after a real two-player session.
 
