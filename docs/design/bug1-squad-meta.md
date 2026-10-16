@@ -1,7 +1,7 @@
 # Bug #1 design: joiner squad names, faction name and jobs survive the save
 
-Status: **step 1 probe run (see "Step 1 results"); step 1b follow-up probe in
-progress** — October 16, 2026.
+Status: **probes done (steps 1 and 1b); step 2 (squad names) in progress** —
+October 16, 2026.
 Bug source: nhoral/KenshiCoop issue #74; docs/PROJECT_BRIEF.md bug table row 1.
 
 ## Symptom
@@ -22,7 +22,7 @@ carries the host's stale copies, and the next load restores them.
 | Data | Engine storage (KenshiLib 0.4.0) | Replicated today? |
 |---|---|---|
 | Squad name | `ActivePlatoon::getName` / `setName` (one per squad tab) | No |
-| Player faction name | `Faction::getName` / `setName` | No |
+| Player faction name | Displayed: `Faction::name` (`getName` / `setName`). **Saved:** `PlayerInterface::factionName`, copied into `Faction::name` on load (step 1b) | No |
 | Permanent jobs | `OrdersReceiver` permajobs: `getPermajobCount`, `getPermajobData(slot)`, `getPermajob(slot)`, `clearPermajobs`, `removePermajob`, `movePermajob`, `addJob` | No |
 
 The only name sync today is the nick channel (`applySquadNicks`), which renames
@@ -39,20 +39,34 @@ one *character*, not a squad.
   change baseline is updated on our own writes, or an applied host value reads
   back as a fresh local rename and oscillates.
 
-## Channel: `PKT_SQUAD_META`
+## Channels
 
 Reliable, change-gated, periodic safety resend, resend on the connect edge
-(same shape as the existing channels).
+(same shape as the existing channels). One fixed-size packet type per value,
+like the rest of `Wire.h`, rather than one packet with sub-kinds:
 
-- `SQUAD_NAME` — squad-tab identity (the same container identity the ownership
-  partition uses) + name (≤ 64 bytes).
-- `JOBS` — character key + ordered job list: task type, subject, location.
+- `PKT_SQUAD_NAME` (step 2) — squad-tab identity (container + containerSerial,
+  the identity the ownership partition uses; step 1 confirmed it matches on
+  both sides) + name (≤ 64 bytes).
+- `PKT_JOBS` (step 4) — character key + ordered job list: task type, subject,
+  location.
+  - Rebuild on apply by `clearPermajobs` then `addJob` in list order (step 1b:
+    order is preserved by clear + re-add and by save + reload).
+  - **Check the count after every add.** The engine silently ignores some
+    types without a fitting subject (step 1b: JOB_KEEP_EVERYTHING_RUNNING with
+    no subject left the count unchanged); log `JOBS-ADD-REJECTED`, never assume.
+  - Carry the subject exactly as read; no value means "none" (steps 1 and 1b
+    read back `0,126`, `0,132` and `0,0` for the same no-subject add).
   - Save-resident subjects share hands on both sides. Session-placed buildings
     and fixtures translate through `localHandForBuildKey` /
     `localHandForFixtureKey`.
   - An unresolved subject is parked and retried against a deadline (§2), then
     logged `JOBS-SUBJECT-GAVEUP`; never silently dropped.
-- `FACTION_RENAME` (join → host) / `FACTION_NAME` (host → all) with seq / ackSeq.
+- `PKT_FACTION_RENAME` (join → host) / `PKT_FACTION_NAME` (host → all) with
+  seq / ackSeq (step 3). Every apply writes **both** `Faction::name` (what is
+  displayed now) and `PlayerInterface::factionName` (what the save keeps);
+  step 1b showed `setName` alone is lost on reload. The template
+  `GameData::name` is never written (shared game data).
 
 Rules:
 
@@ -61,14 +75,17 @@ Rules:
 - Apply only when the value differs; never apply onto a body or tab the
   receiver owns.
 - Unconditional log lines for every send/apply verdict (§9).
-- Gate: `KENSHICOOP_SQUAD_META=0` disables the channel for A/B runs.
+- Gate: `KENSHICOOP_SQUAD_META=0` disables the channels for A/B runs.
 - Protocol bump in `src/netproto/Wire.h`: public 70 → **72**, diagnostic
-  71 → **73** (keeps the even/odd public/diagnostic split). Both players must
+  71 → **73** (keeps the even/odd public/diagnostic split), made once in step 2
+  for the whole branch (nothing is released between steps). Both players must
   update together.
 
 ## Verification
 
-- Scenario `squad_meta_persist`, modelled on `money_persist`: the join renames
+- Scenario `squad_meta_persist`, modelled on `money_persist`, grows with each
+  step (step 2: the tab name only; steps 3 and 4 add the faction and jobs). The
+  join renames
   its tab, renames the faction and gives one character a job; the host
   **latches** what it received before saving (a run that never latched fails,
   it proves nothing); coordinated save → ACK → load; both sides re-read all
@@ -127,14 +144,35 @@ join's tab was `Nameless_1` again, its faction `Nameless`, and its leader's job
 list was the one the **host** had written onto the puppet (subject `0,126`),
 not the join's own (`0,132`). The host's own rename survived on both sides.
 
+## Step 1b results (run `20261016_153910`, same setup)
+
+Verdict PASS (`squad_meta_probe2` primary); advisory `march` FAIL as before.
+
+1. **Faction name.** The host wrote `P2 Member Name` to `Faction::name` and
+   `P2 Iface Name` to `PlayerInterface::factionName`; the template
+   `GameData::name` stayed `Nameless` throughout. After save + reload **both**
+   sides read `Faction::name = PlayerInterface::factionName = P2 Iface Name`:
+   the save keeps `PlayerInterface::factionName` and the load copies it into
+   `Faction::name`.
+2. **Job order.** Both sides appended JOB_MEDIC (58) and JOB_REPAIR_ROBOT (57);
+   JOB_KEEP_EVERYTHING_RUNNING (89) was **silently rejected** (call returned,
+   count stayed 2). Clear + re-add gave back `58,57` exactly (`firstDiff=-1`)
+   on both sides, and the host's leader still had `58,57` after reload.
+   No-subject jobs read back subject `0,0` this time (step 1: `0,126`).
+3. **Bug #1 again, for jobs.** The join's leader had `58,57` before the save
+   and 0 jobs after reload; it saw the host's leader's `58,57` correctly.
+
+All open questions are answered except the mid-session new squad tab, which
+step 2 covers.
+
 ## Steps (branch `fix/squad-meta-persist`, one commit each)
 
 1. **Probe scenario `squad_meta_probe`** — read/write each value on own tabs,
    peer tabs and the faction; save → reload → re-read. Answers 1–4. No protocol
    change. **Done** (results above).
 1b. **Follow-up probe `squad_meta_probe2`** — which faction field the save
-   keeps, and whether clear + re-add preserves the order of 2+ jobs.
-2. Squad names end to end + gate.
+   keeps, and whether clear + re-add preserves the order of 2+ jobs. **Done.**
+2. Squad names end to end + gate (`PKT_SQUAD_NAME`, protocol bump).
 3. Faction rename op channel.
 4. Jobs, including subject translation and parking.
 5. Update docs/PROJECT_BRIEF.md's bug table only after a real two-player session.
