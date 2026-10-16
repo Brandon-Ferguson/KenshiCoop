@@ -1115,6 +1115,28 @@ bool setFactionNameCopy(GameWorld* gw, const char* name) {
     f->setName(std::string(name));
     return true;
 }
+void copyField(const std::string& s, char* out, unsigned int cap) {
+    if (!out) return;
+    strncpy(out, s.c_str(), cap - 1);
+    out[cap - 1] = '\0';
+}
+bool factionFieldsCopy(GameWorld* gw, char* member, char* iface, char* data,
+                       unsigned int cap) {
+    if (!gw->player) return false;
+    copyField(gw->player->factionName, iface, cap);
+    Faction* f = gw->player->getFaction();
+    if (f) {
+        copyField(f->getName(), member, cap);
+        GameData* gd = f->getData();
+        if (gd) copyField(gd->name, data, cap);
+    }
+    return true;
+}
+bool setIfaceFactionNameCopy(GameWorld* gw, const char* name) {
+    if (!gw->player) return false;
+    gw->player->factionName = name;
+    return true;
+}
 bool addPermajobCall(OrdersReceiver* o, int type, const unsigned int subj[5],
                      float x, float y, float z) {
     hand h;
@@ -1162,6 +1184,29 @@ bool setPlayerFactionName(GameWorld* gw, const char* name) {
     if (!gw || !name) return false;
     __try {
         return setFactionNameCopy(gw, name);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool playerFactionFields(GameWorld* gw, char* member, char* iface, char* data,
+                         unsigned int cap) {
+    if (cap == 0) return false;
+    if (member) member[0] = '\0';
+    if (iface)  iface[0]  = '\0';
+    if (data)   data[0]   = '\0';
+    if (!gw) return false;
+    __try {
+        return factionFieldsCopy(gw, member, iface, data, cap);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool setPlayerIfaceFactionName(GameWorld* gw, const char* name) {
+    if (!gw || !name) return false;
+    __try {
+        return setIfaceFactionNameCopy(gw, name);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }

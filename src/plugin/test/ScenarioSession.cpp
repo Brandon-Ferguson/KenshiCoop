@@ -1,6 +1,7 @@
 // ScenarioSession.cpp - session lifecycle scenarios (monolith split from
 // Scenario.cpp, 2026-07-12): latejoin_probe/latejoin_sync, save_probe,
-// save_sync/save_stage1, resume_check, load_probe, load_sync, money_persist, squad_meta_probe. Classes are
+// save_sync/save_stage1, resume_check, load_probe, load_sync, money_persist,
+// squad_meta_probe/squad_meta_probe2. Classes are
 // TU-private (anonymous namespace); only makeSessionScenario
 // (ScenarioSupport.h) is exported.
 // Must NOT: change any SCENARIO log string (oracle API, resources/CODE_MAP.md).
@@ -1357,10 +1358,25 @@ const char* const MoneyPersistScenario::SAVE_NAME = "coopresume";
 // symptom itself: phase=mid shows whether the host ever saw those values,
 // phase=post whether the reload wiped them. Passes when every step ran; the
 // answers are in the lines, not in the verdict.
+//
+// squad_meta_probe2 (step 1b, same flow, different writes) answers the two
+// questions step 1 left open:
+//   faction field - the host writes DIFFERENT names to Faction::name (setName)
+//                   and PlayerInterface::factionName at t=14s; SMFACFIELDS in
+//                   every census shows all three candidate fields (template
+//                   GameData::name is read only), so phase=post shows which
+//                   one the save keeps.
+//   job order     - both sides append three job types with no subject to
+//                   their own leader (only JOB_MEDIC is proven to accept
+//                   that; a rejected add is logged ok=0), then SMJOBROUND
+//                   clears and re-adds them in list order; phase=post SMJOBS
+//                   shows the order after reload.
 class SquadMetaProbeScenario : public TimedScenario {
 public:
-    SquadMetaProbeScenario()
-        : TimedScenario("squad_meta_probe", /*evidenceMs=*/0),
+    explicit SquadMetaProbeScenario(bool followUp)
+        : TimedScenario(followUp ? "squad_meta_probe2" : "squad_meta_probe",
+                        /*evidenceMs=*/0),
+          followUp_(followUp),
           preDone_(false), writeDone_(false), midDone_(false),
           hostFacDone_(false), writesOk_(false), puppetSamples_(0),
           lastPuppetMs_(0), ackBase_(0), saveIssued_(false), saveOk_(false),
@@ -1384,7 +1400,22 @@ public:
         }
 
         // ---- Writes: each side changes only what the probe question needs ----
-        if (preDone_ && !writeDone_ && live && ctx.elapsedMs >= WRITE_AT_MS) {
+        if (followUp_ && preDone_ && !writeDone_ && live &&
+            ctx.elapsedMs >= WRITE_AT_MS) {
+            writeDone_ = true;
+            Character* own = tabLeader(ctx, ownRank);
+            if (own) {
+                for (unsigned int i = 0; i < ORDER_JOB_COUNT; ++i)
+                    addJob(own, ORDER_JOBS[i], "own", who);
+                jobRoundTrip(own, who);
+            } else {
+                smLog("SCENARIO SMWRITE kind=all ok=0 why=no-own-tab rank=%u who=%s",
+                      ownRank, who);
+            }
+            writesOk_ = (own != 0);
+        }
+        if (!followUp_ && preDone_ && !writeDone_ && live &&
+            ctx.elapsedMs >= WRITE_AT_MS) {
             writeDone_ = true;
             Character* own = tabLeader(ctx, ownRank);
             bool okName = false, okFac = true;
@@ -1397,11 +1428,11 @@ public:
                 }
                 // Whether addJob appends is a FINDING (Q3), not a step that
                 // must succeed, so it does not feed writesOk_.
-                addMedic(own, "own", who);
+                addJob(own, (int)JOB_MEDIC, "own", who);
             }
             if (ctx.isHost) {
                 Character* puppet = tabLeader(ctx, peerRank);
-                if (puppet) addMedic(puppet, "puppet", who);
+                if (puppet) addJob(puppet, (int)JOB_MEDIC, "puppet", who);
                 else smLog("SCENARIO SMWRITE kind=jobadd target=puppet ok=0 "
                            "why=no-peer-tab who=%s", who);
             }
@@ -1412,7 +1443,8 @@ public:
         }
 
         // Q4: does a permajob wake an AI-suppressed puppet on the host?
-        if (ctx.isHost && writeDone_ && live && puppetSamples_ < PUPPET_SAMPLES &&
+        if (!followUp_ && ctx.isHost && writeDone_ && live &&
+            puppetSamples_ < PUPPET_SAMPLES &&
             ctx.elapsedMs - lastPuppetMs_ >= 1000) {
             lastPuppetMs_ = ctx.elapsedMs;
             ++puppetSamples_;
@@ -1432,7 +1464,19 @@ public:
         if (ctx.isHost) {
             if (midDone_ && !hostFacDone_ && live && ctx.elapsedMs >= HOST_FAC_MS) {
                 hostFacDone_ = true;
-                writesOk_ = writeFaction(ctx, "SMProbe Host Faction", who) && writesOk_;
+                if (followUp_) {
+                    // Different names per field, so phase=post says which one
+                    // the save kept (or that neither did).
+                    logFactionFields(ctx, "prewrite", who);
+                    bool m = writeFaction(ctx, "P2 Member Name", who);
+                    bool f = engine::setPlayerIfaceFactionName(ctx.gw, "P2 Iface Name");
+                    smLog("SCENARIO SMWRITE kind=ifacefaction name='P2 Iface Name' "
+                          "ok=%d who=%s", f ? 1 : 0, who);
+                    logFactionFields(ctx, "postwrite", who);
+                    writesOk_ = m && f && writesOk_;
+                } else {
+                    writesOk_ = writeFaction(ctx, "SMProbe Host Faction", who) && writesOk_;
+                }
             }
             if (hostFacDone_ && !saveIssued_ && live && ctx.elapsedMs >= SAVE_AT_MS) {
                 saveIssued_ = true;
@@ -1556,6 +1600,16 @@ private:
         bool fok = engine::playerFactionName(ctx.gw, fac, sizeof(fac));
         smLog("SCENARIO SMFACTION phase=%s name='%s' ok=%d who=%s", phase,
               fok ? fac : "", fok ? 1 : 0, who);
+        logFactionFields(ctx, phase, who);
+    }
+
+    // Step 1b: all three candidate faction-name fields in one line.
+    static void logFactionFields(const ScenarioContext& ctx, const char* phase,
+                                 const char* who) {
+        char member[72], iface[72], data[72];
+        bool ok = engine::playerFactionFields(ctx.gw, member, iface, data, 72);
+        smLog("SCENARIO SMFACFIELDS phase=%s member='%s' iface='%s' data='%s' "
+              "ok=%d who=%s", phase, member, iface, data, ok ? 1 : 0, who);
     }
 
     static void logJobs(Character* c, const char* phase, unsigned int rank,
@@ -1596,17 +1650,16 @@ private:
         return ok;
     }
 
-    // Q3: append JOB_MEDIC (needs no subject) and report the count delta.
-    static bool addMedic(Character* c, const char* target, const char* who) {
+    // Q3: append one job with a default (no) subject and report the count delta.
+    static bool addJob(Character* c, int type, const char* target, const char* who) {
         engine::PermajobRead jr[MAX_JOBS];
         int before = engine::readPermajobs(c, jr, MAX_JOBS);
-        bool ok = engine::addPermajob(c, (int)JOB_MEDIC, 0, 0.0f, 0.0f, 0.0f);
+        bool ok = engine::addPermajob(c, type, 0, 0.0f, 0.0f, 0.0f);
         int after = engine::readPermajobs(c, jr, MAX_JOBS);
         int last = (after > 0 && after <= (int)MAX_JOBS) ? jr[after - 1].type : -1;
-        bool appended = ok && before >= 0 && after == before + 1 &&
-                        last == (int)JOB_MEDIC;
+        bool appended = ok && before >= 0 && after == before + 1 && last == type;
         smLog("SCENARIO SMWRITE kind=jobadd target=%s type=%d before=%d after=%d "
-              "last=%d call=%d ok=%d who=%s", target, (int)JOB_MEDIC, before, after,
+              "last=%d call=%d ok=%d who=%s", target, type, before, after,
               last, ok ? 1 : 0, appended ? 1 : 0, who);
         return appended;
     }
@@ -1653,7 +1706,13 @@ private:
     static const unsigned long SETTLE_MS        = 5000;
     static const unsigned long TAIL_HOLD_MS     = 8000;
     static const unsigned long DURATION_MS      = 110000;
+    // Step 1b job-order set: three DIFFERENT job types added with no subject
+    // (JOB_MEDIC proven by step 1; the other two are candidates), so a
+    // reorder is visible in the type sequence alone.
+    static const unsigned int  ORDER_JOB_COUNT  = 3;
+    static const int           ORDER_JOBS[ORDER_JOB_COUNT];
 
+    bool          followUp_; // squad_meta_probe2 (step 1b) writes
     bool          preDone_, writeDone_, midDone_, hostFacDone_, writesOk_;
     unsigned int  puppetSamples_;
     unsigned long lastPuppetMs_;
@@ -1665,6 +1724,9 @@ private:
     static const char* const SAVE_NAME;
 };
 const char* const SquadMetaProbeScenario::SAVE_NAME = "coopresume";
+const int SquadMetaProbeScenario::ORDER_JOBS[SquadMetaProbeScenario::ORDER_JOB_COUNT] = {
+    (int)JOB_MEDIC, (int)JOB_REPAIR_ROBOT, (int)JOB_KEEP_EVERYTHING_RUNNING
+};
 
 } // namespace
 
@@ -1678,7 +1740,8 @@ Scenario* makeSessionScenario(const std::string& name) {
     if (name == "load_probe")     return new LoadProbeScenario();
     if (name == "load_sync")      return new LoadSyncScenario();
     if (name == "money_persist")  return new MoneyPersistScenario();
-    if (name == "squad_meta_probe") return new SquadMetaProbeScenario();
+    if (name == "squad_meta_probe")  return new SquadMetaProbeScenario(false);
+    if (name == "squad_meta_probe2") return new SquadMetaProbeScenario(true);
     return 0;
 }
 

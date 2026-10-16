@@ -322,17 +322,28 @@ void charSetName(Character* c, const char* name);
 bool squadNameOf(Character* c, char* out, unsigned int cap);
 bool setSquadNameOf(Character* c, const char* name);
 // Display name of the shared player faction (gw->player->getFaction()).
+// Faction::setName reads back but does NOT survive a save + reload (step 1
+// probe); the persisted name lives elsewhere (step 1b).
 bool playerFactionName(GameWorld* gw, char* out, unsigned int cap);
 bool setPlayerFactionName(GameWorld* gw, const char* name);
+// Step 1b: the three places a player faction name can live - Faction::name
+// (what setName writes), PlayerInterface::factionName (serialised with the
+// player interface) and the faction template's GameData::name (read only:
+// it is shared game data). Each out buffer is optional; returns false only
+// when nothing could be read.
+bool playerFactionFields(GameWorld* gw, char* member, char* iface, char* data,
+                         unsigned int cap);
+bool setPlayerIfaceFactionName(GameWorld* gw, const char* name);
 // One permanent job (OrdersReceiver permajob slot): engine TaskType, subject
 // hand (readObjectHand layout: type, container, containerSerial, index,
-// serial; all zero = no subject) and location.
+// serial) and location. A job added with no subject does NOT read back all
+// zero (step 1 probe: index,serial 0,126) - carry the subject as read.
 struct PermajobRead { int type; unsigned int subj[5]; float x, y, z; };
 // Fills up to maxOut slots in list order and returns the TOTAL permajob count
 // (may exceed maxOut); -1 when the character or its orders are unreadable.
 int  readPermajobs(Character* c, PermajobRead* out, unsigned int maxOut);
-// Appends one job through OrdersReceiver::addJob (subj may be 0). Whether that
-// call appends to the permajob list at all is probe question 3.
+// Appends one job through OrdersReceiver::addJob (subj may be 0 for a default
+// hand). Step 1 probe: appends to the permajob list and persists in the save.
 bool addPermajob(Character* c, int type, const unsigned int subj[5],
                  float x, float y, float z);
 bool clearPermajobs(Character* c);

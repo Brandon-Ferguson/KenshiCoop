@@ -1527,6 +1527,21 @@
             Tier = 'probe'; WanVariant = $false
         }
 
+        # squad_meta_probe2: Bug #1 step 1b, same flow as squad_meta_probe. The
+        # host writes different names to Faction::name and
+        # PlayerInterface::factionName before the save (step 1 showed setName
+        # alone does not persist); both sides append three different job
+        # types with no subject and clear + re-add them. The oracle gates only that
+        # the steps ran and prints which faction field survived and the job
+        # order before/after the round trip and the reload.
+        squad_meta_probe2 = @{
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'squad_meta_probe2'
+            Gating   = @('squad_meta_probe2')
+            Advisory = @('smoothness', 'anim_truth', 'march', 'clock_sync')
+            Tier = 'probe'; WanVariant = $false
+        }
+
         # bootstrap_stream: the missing-save "seamless join" proof (protocol
         # 31/32). NOT a run_test tier member and NOT run_test-drivable - it needs
         # the join-from-MENU launch (join has NO save, goes ONLINE, host bakes +
