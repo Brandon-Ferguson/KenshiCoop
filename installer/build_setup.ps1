@@ -76,6 +76,11 @@ $reTmp = Join-Path $build 're'
 [IO.Compression.ZipFile]::ExtractToDirectory($reZip, $reTmp)
 Copy-Item -LiteralPath (Join-Path $reTmp 'install') -Destination "$payload\RE_Kenshi" -Recurse
 Copy-Item -LiteralPath (Join-Path $reTmp 'Licenses') -Destination "$payload\RE_Kenshi" -Recurse
+# The tool + patch RE_Kenshi's installer uses to make the 1.0.65 game copy on Steam 1.0.68.
+New-Item -ItemType Directory -Force -Path "$payload\RE_Kenshi\tools" | Out-Null
+foreach ($t in @('courgette64.exe', 'courgette64.LICENSE', 'kenshi_x64.exe.patch')) {
+    Copy-Item -LiteralPath (Join-Path $reTmp "tools\$t") -Destination "$payload\RE_Kenshi\tools"
+}
 Copy-Item -LiteralPath (Join-Path $Repo 'LICENSE') -Destination "$payload\KenshiCoop\LICENSE.txt"
 
 @"

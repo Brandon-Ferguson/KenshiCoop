@@ -6,10 +6,12 @@
 #
 # Install:
 #   1. find Steam's Kenshi (registry + libraryfolders.vdf), or let the player pick
-#   2. refuse while Kenshi is running; check kenshi_x64.exe is Steam 1.0.65
+#   2. refuse while Kenshi is running; check kenshi_x64.exe is Steam 1.0.68 or 1.0.65
 #   3. back up saves, Plugins_x64.cfg, data\mods.cfg and any old mod folder
 #   4. RE_Kenshi 0.3.5 if missing - the documented manual install: copy the
-#      loose files, put Plugin=RE_Kenshi before the first Plugin= line
+#      loose files, put Plugin=RE_Kenshi before the first Plugin= line - and,
+#      on 1.0.68, the 1.0.65 game copy at RE_Kenshi\kenshi_x64.exe that RE_Kenshi's
+#      own installer makes (courgette64 + patch, verified byte-exact first)
 #   5. the mod into mods\KenshiCoop (an existing coop_config.json is kept)
 #   6. KenshiCoop.mod into data\mods.cfg (other mods are untouched)
 #   7. a fresh coop_config.json defaults to the Steam transport
@@ -34,8 +36,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $SetupVersion   = '0.1.32'
-# kenshi_x64.exe of Steam Kenshi 1.0.65 (RE_Kenshi reports "Kenshi 1.0.65 / Steam / supported").
-$KenshiExeSha256 = 'A596AB4E407C67B58599C54FFB32DC1BF2B64510CDEBD3FA9359EF05A576AEB1'
+# kenshi_x64.exe fingerprints (SHA-256), cross-checked against the MD5 list in
+# RE_Kenshi 0.3.5's config.json ("Steam 1.0.68" 8a03c256..., "Steam 1.0.65" df4a5a7e...).
+# Steam now ships 1.0.68. The mod and RE_Kenshi run on 1.0.65, so for 1.0.68
+# RE_Kenshi's installer builds a 1.0.65 copy at RE_Kenshi\kenshi_x64.exe with
+# its bundled courgette64 + kenshi_x64.exe.patch, and the game relaunches into
+# it. This setup does the same and checks the result is byte-exact Steam 1.0.65.
+$KenshiSteam068Sha = 'A596AB4E407C67B58599C54FFB32DC1BF2B64510CDEBD3FA9359EF05A576AEB1'
+$KenshiSteam065Sha = '504B362CDE850D56AFB1CEA6F5B7B0EE014D9DD7B47E188599D91C804502CD3E'
 $KenshiAppId    = '233860'
 $ModFiles       = @('KenshiCoop.dll', 'KenshiCoopUI.dll', 'KenshiCoop.mod', 'RE_Kenshi.json')
 $ReKenshiFiles  = @('RE_Kenshi.dll', 'KenshiLib.dll', 'CompressToolsLib.dll')
@@ -131,15 +139,20 @@ function Assert-KenshiClosed {
         if ($r -ne 'Retry') { throw 'Cancelled: Kenshi is still running.' }
     }
 }
+# Returns '1.0.68' or '1.0.65' (Steam), or 'unknown' if the player chose to go on anyway.
 function Assert-KenshiVersion([string]$dir) {
-    if ($SkipVersionCheck) { Write-Log 'Version check skipped.'; return }
+    # Test hook: -SkipVersionCheck forces the 1.0.68 path without fingerprinting.
+    if ($SkipVersionCheck) { Write-Log 'Version check skipped (treating as Steam 1.0.68).'; return '1.0.68' }
     $sha = (Get-FileHash -LiteralPath (Join-Path $dir 'kenshi_x64.exe') -Algorithm SHA256).Hash
-    if ($sha -eq $KenshiExeSha256) { Write-Log 'Kenshi version: 1.0.65 (Steam) - supported.'; return }
+    if ($sha -eq $KenshiSteam068Sha) { Write-Log 'Kenshi version: Steam 1.0.68 - supported (RE_Kenshi runs it as 1.0.65).'; return '1.0.68' }
+    if ($sha -eq $KenshiSteam065Sha) { Write-Log 'Kenshi version: Steam 1.0.65 - supported.'; return '1.0.65' }
     Write-Log "Kenshi version not recognised (kenshi_x64.exe sha256 $($sha.Substring(0,12))...)."
-    $ok = Ask-YesNo ("This copy of Kenshi is not the Steam 1.0.65 version the co-op mod needs.`r`n`r`n" +
-        "To fix it: in Steam, right-click Kenshi > Properties > Betas, choose 'None', let Steam " +
-        "update, then run this setup again.`r`n`r`nContinue anyway? (The mod will probably not work.)")
+    $ok = Ask-YesNo ("This copy of Kenshi is not a version the co-op mod supports (the Steam version of Kenshi 1.0.68 or 1.0.65; " +
+        "GOG and other stores are not supported).`r`n`r`n" +
+        "If you play on Steam: right-click Kenshi > Properties > Betas, choose 'None', let Steam finish " +
+        "updating, then run this setup again.`r`n`r`nContinue anyway? (The mod will probably not work.)")
     if (-not $ok) { throw 'Stopped: unsupported Kenshi version.' }
+    return 'unknown'
 }
 
 # ---- payload ----------------------------------------------------------------
@@ -183,19 +196,59 @@ function Test-PluginLine([string[]]$lines) {
     foreach ($l in $lines) { if ($l -match '^\s*Plugin\s*=\s*RE_Kenshi\s*$') { return $true } }
     return $false
 }
-function Install-ReKenshi([string]$kenshi, [string]$stage) {
+# Build the Steam 1.0.65 game file from the player's 1.0.68 one with RE_Kenshi's own
+# courgette64 + patch, into the temp stage, and prove it byte-exact. Changes nothing
+# in the Kenshi folder; throws if anything is off.
+function New-CompatExe([string]$kenshi, [string]$stage) {
+    $tools = Join-Path $stage 'RE_Kenshi\tools'
+    $out = Join-Path $stage 'kenshi_x64_1.0.65.exe'
+    Write-Log 'Preparing the Kenshi 1.0.65 game file RE_Kenshi needs (a few seconds)...'
+    $args = @('-apply', ('"{0}"' -f (Join-Path $kenshi 'kenshi_x64.exe')),
+              ('"{0}"' -f (Join-Path $tools 'kenshi_x64.exe.patch')), ('"{0}"' -f $out))
+    $p = Start-Process -FilePath (Join-Path $tools 'courgette64.exe') -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
+    if ($p.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $out)) {
+        throw "Could not create the Kenshi 1.0.65 game file (courgette exit code $($p.ExitCode)). Nothing in your Kenshi folder was changed."
+    }
+    $h = (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash
+    if ($h -ne $KenshiSteam065Sha) {
+        throw "The Kenshi 1.0.65 game file did not come out exactly right (sha256 $($h.Substring(0,12))...). Nothing in your Kenshi folder was changed."
+    }
+    return $out
+}
+# Returns @{ installedReKenshi; createdCompat } - what this run added, for uninstall.
+function Install-ReKenshi([string]$kenshi, [string]$stage, [string]$version, [string]$backup) {
+    $result = @{ installedReKenshi = $false; createdCompat = $false }
     $cfg = Join-Path $kenshi 'Plugins_x64.cfg'
     $lines = Read-Lines $cfg
     $haveDll = Test-Path -LiteralPath (Join-Path $kenshi 'RE_Kenshi.dll')
     $haveLine = Test-PluginLine $lines
-    if ($haveDll -and $haveLine) { Write-Log 'RE_Kenshi is already installed - leaving it as it is.'; return $false }
-    $copied = $false
+    $compat = Join-Path $kenshi 'RE_Kenshi\kenshi_x64.exe'
+    $needCompat = ($version -eq '1.0.68')
+    $haveCompat = (Test-Path -LiteralPath $compat) -and
+                  ((Get-FileHash -LiteralPath $compat -Algorithm SHA256).Hash -eq $KenshiSteam065Sha)
+    if ($haveDll -and $haveLine -and (-not $needCompat -or $haveCompat)) {
+        Write-Log 'RE_Kenshi is already installed - leaving it as it is.'
+        return $result
+    }
+    # Everything that can fail happens BEFORE the Kenshi folder is touched.
+    $compatTmp = $null
+    if ($needCompat -and -not $haveCompat) { $compatTmp = New-CompatExe $kenshi $stage }
+
     if (-not $haveDll) {
         Write-Log 'Installing RE_Kenshi 0.3.5...'
         $src = Join-Path $stage 'RE_Kenshi\install'
         foreach ($f in $ReKenshiFiles) { Copy-Item -LiteralPath (Join-Path $src $f) -Destination $kenshi -Force }
         Copy-Item -LiteralPath (Join-Path $src 'RE_Kenshi') -Destination $kenshi -Recurse -Force
-        $copied = $true
+        $result.installedReKenshi = $true
+    }
+    if ($compatTmp) {
+        if (Test-Path -LiteralPath $compat) {   # an outdated copy: keep it in the backup
+            Copy-Item -LiteralPath $compat -Destination (Join-Path $backup 'RE_Kenshi_kenshi_x64.exe')
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path $compat -Parent) | Out-Null
+        Copy-Item -LiteralPath $compatTmp -Destination $compat -Force
+        $result.createdCompat = $true
+        Write-Log 'Created RE_Kenshi\kenshi_x64.exe (Kenshi 1.0.65, verified).'
     }
     if (-not $haveLine) {
         $out = New-Object System.Collections.ArrayList
@@ -208,7 +261,7 @@ function Install-ReKenshi([string]$kenshi, [string]$stage) {
         Write-Lines $cfg ([string[]]$out)
         Write-Log 'Registered RE_Kenshi in Plugins_x64.cfg.'
     }
-    return $copied
+    return $result
 }
 function Install-Mod([string]$kenshi, [string]$stage) {
     $dest = Join-Path $kenshi 'mods\KenshiCoop'
@@ -235,10 +288,13 @@ function Enable-Mod([string]$kenshi) {
 
 # ---- record (for uninstall) ---------------------------------------------------
 function Get-RecordPath([string]$kenshi) { return (Join-Path $kenshi 'mods\KenshiCoop\setup-record.json') }
-function Save-Record([string]$kenshi, [bool]$installedReKenshi, [string]$backup) {
+function Save-Record([string]$kenshi, $added, [string]$backup) {
+    # Flags only ever accumulate: a re-install must not forget what an earlier run added.
     $old = Read-Record $kenshi
-    if ($old -and $old.installedReKenshi) { $installedReKenshi = $true }
-    $rec = [ordered]@{ version = $SetupVersion; installedReKenshi = $installedReKenshi; backup = $backup;
+    $installedReKenshi = [bool]$added.installedReKenshi -or ($old -and $old.installedReKenshi)
+    $createdCompat     = [bool]$added.createdCompat -or ($old -and $old.createdCompat)
+    $rec = [ordered]@{ version = $SetupVersion; installedReKenshi = [bool]$installedReKenshi;
+                       createdCompat = [bool]$createdCompat; backup = $backup;
                        installedAt = (Get-Date).ToString('s') }
     [IO.File]::WriteAllText((Get-RecordPath $kenshi), ($rec | ConvertTo-Json), $Latin1)
 }
@@ -253,21 +309,22 @@ function Invoke-Install([string]$kenshi) {
     if (-not (Test-KenshiFolder $kenshi)) { throw "That folder is not a Kenshi installation: $kenshi" }
     Write-Log "Kenshi folder: $kenshi"
     Assert-KenshiClosed
-    Assert-KenshiVersion $kenshi
+    $version = Assert-KenshiVersion $kenshi
     $stage = Expand-Payload
     try {
         $backup = New-Backup $kenshi
-        $addedRe = Install-ReKenshi $kenshi $stage
+        $added = Install-ReKenshi $kenshi $stage $version $backup
         Install-Mod $kenshi $stage
         Enable-Mod $kenshi
-        Save-Record $kenshi $addedRe $backup
+        Save-Record $kenshi $added $backup
         [IO.File]::WriteAllLines((Join-Path $backup 'setup-log.txt'), [string[]]$script:LogLines)
     } finally {
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
     Write-Log 'All done!'
     Show-Message ("KenshiCoop is installed.`r`n`r`n" +
-        "1. Start Kenshi from Steam as usual. The main menu should say 'RE_Kenshi v0.3.5'.`r`n" +
+        "1. Start Kenshi from Steam as usual and click OK in the Kenshi launcher window. The main menu " +
+        "should say 'RE_Kenshi 0.3.5 - Kenshi 1.0.65' in the bottom-right corner.`r`n" +
         "2. Load the same save as your friends, then press F2.`r`n" +
         "3. Host: choose Steam, click 'Copy Steam ID' and send it to your friends.`r`n" +
         "4. Friends: choose Steam, paste the host's Steam ID and connect.`r`n`r`n" +
