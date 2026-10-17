@@ -6,7 +6,8 @@
 # Steps: build the Release DLL pair (unless -SkipBuild), check it carries this
 # version, fetch RE_Kenshi 0.3.5's loose release (SHA-256 pinned, cached),
 # stage payload.zip (mod files + RE_Kenshi install files, licenses, NOTICE),
-# and pack Setup.ps1 + launch.cmd + payload.zip with Windows' own IExpress.
+# and compile Launcher.cs into the .exe with Setup.ps1 + payload.zip embedded,
+# using the C# compiler that comes with Windows' .NET Framework.
 
 [CmdletBinding()]
 param(
@@ -89,61 +90,25 @@ RE_Kenshi 0.3.5 by BFrizzleFoShizzle - redistributed unmodified
 "@ | Set-Content -LiteralPath (Join-Path $payload 'NOTICE.txt') -Encoding ASCII
 
 [IO.Compression.ZipFile]::CreateFromDirectory($payload, (Join-Path $stage 'payload.zip'))
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Setup.ps1'), (Join-Path $PSScriptRoot 'launch.cmd') -Destination $stage
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Setup.ps1') -Destination $stage
 
-# ---- IExpress -----------------------------------------------------------------
+# ---- launcher exe (Launcher.cs + embedded Setup.ps1 / payload.zip) ------------
+# Built with the C# compiler of Windows' own .NET Framework 4.x - nothing to
+# install. (IExpress was tried first: its stubs never run their command on
+# Windows 11 build 26200.)
+$csc = Join-Path $env:windir 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if (-not (Test-Path -LiteralPath $csc)) { throw "C# compiler not found: $csc" }
 New-Item -ItemType Directory -Force -Path (Split-Path $Out -Parent) | Out-Null
 if (Test-Path -LiteralPath $Out) { Remove-Item -LiteralPath $Out -Force }
-$sed = Join-Path $build 'setup.sed'
-@"
-[Version]
-Class=IEXPRESS
-SEDVersion=3
-[Options]
-PackagePurpose=InstallApp
-ShowInstallProgramWindow=1
-HideExtractAnimation=1
-UseLongFileName=1
-InsideCompressed=0
-CAB_FixedSize=0
-CAB_ResvCodeSigning=0
-RebootMode=N
-InstallPrompt=%InstallPrompt%
-DisplayLicense=%DisplayLicense%
-FinishMessage=%FinishMessage%
-TargetName=%TargetName%
-FriendlyName=%FriendlyName%
-AppLaunched=%AppLaunched%
-PostInstallCmd=%PostInstallCmd%
-AdminQuietInstCmd=%AdminQuietInstCmd%
-UserQuietInstCmd=%UserQuietInstCmd%
-SourceFiles=SourceFiles
-[Strings]
-InstallPrompt=
-DisplayLicense=
-FinishMessage=
-TargetName=$Out
-FriendlyName=KenshiCoop Setup $Version
-AppLaunched=cmd.exe /c launch.cmd
-PostInstallCmd=<None>
-AdminQuietInstCmd=
-UserQuietInstCmd=
-FILE0="launch.cmd"
-FILE1="Setup.ps1"
-FILE2="payload.zip"
-[SourceFiles]
-SourceFiles0=$stage\
-[SourceFiles0]
-%FILE0%=
-%FILE1%=
-%FILE2%=
-"@ | Set-Content -LiteralPath $sed -Encoding ASCII
-
-# IExpress cannot open a QUOTED directive path ("Error opening the IExpress Self
-# Extraction Directive file"), so run it from the build folder with a bare name.
-$p = Start-Process -FilePath "$env:windir\System32\iexpress.exe" -ArgumentList '/N', '/Q', 'setup.sed' `
-                   -WorkingDirectory $build -Wait -PassThru
-if (-not (Test-Path -LiteralPath $Out)) { throw "IExpress did not produce $Out (exit $($p.ExitCode))" }
+$verParts = ($Version.Split('.') + @('0', '0', '0'))[0..2]
+$asmVer = (($verParts -join '.') + '.0')
+$verCs = Join-Path $build 'Version.cs'
+"[assembly: System.Reflection.AssemblyVersion(`"$asmVer`")]`r`n[assembly: System.Reflection.AssemblyFileVersion(`"$asmVer`")]`r`n" |
+    Set-Content -LiteralPath $verCs -Encoding ASCII
+& $csc /nologo /target:winexe /platform:anycpu /optimize+ "/out:$Out" `
+    "/resource:$(Join-Path $stage 'Setup.ps1'),Setup.ps1" "/resource:$(Join-Path $stage 'payload.zip'),payload.zip" `
+    /reference:System.Windows.Forms.dll (Join-Path $PSScriptRoot 'Launcher.cs') $verCs
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $Out)) { throw "csc failed ($LASTEXITCODE)" }
 $o = Get-Item -LiteralPath $Out
 Write-Host ("Built {0}  {1:N0} bytes  sha256={2}" -f $o.FullName, $o.Length, (Get-FileHash -LiteralPath $Out -Algorithm SHA256).Hash)
 Write-Host "Version $Version, protocol from Wire.h, RE_Kenshi 0.3.5 bundled."

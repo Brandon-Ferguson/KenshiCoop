@@ -1,6 +1,6 @@
 # test_setup.ps1 - dry-run tests for installer/Setup.ps1 against a FAKE Kenshi folder
 # (copies kenshi_x64.exe from the Steam install; never touches the real game).
-# Unpack the built exe first:  dist\KenshiCoop-Setup.exe /T:<folder> /C /Q
+# -Extract: a folder holding Setup.ps1 + payload.zip (installer\build\stage after a build).
 #   powershell -ExecutionPolicy Bypass -File installer\test_setup.ps1 -Extract <folder>
 param([string]$Extract)
 $ErrorActionPreference = 'Stop'
