@@ -1531,6 +1531,19 @@ function Test-MeleeTogether {
     foreach ($ph in 'together', 'apart') {
         if ($res[$ph].fightSec -lt 10) { $why += "join leader fought only $($res[$ph].fightSec) s in '$ph' (< 10 s) - too little to measure" }
     }
+    # A paused game lands nothing (bug #17: the host's loading pause after its
+    # camera jump became a shared pause). Walk the join log in order, tracking
+    # the last [speed] SET paused= state, and count APART samples taken paused.
+    $wA = Get-PhaseWindow $join 'apart' 'join'
+    $pausedNow = $false; $pausedSamples = 0; $apartSamples = 0
+    for ($i = 0; $i -lt $join.Count; $i++) {
+        if ($join[$i] -match "\[speed\] SET mult=\S+ paused=(\d)") { $pausedNow = ($Matches[1] -eq '1') }
+        if ($wA[0] -ge 0 -and $i -gt $wA[0] -and $i -lt $wA[1] -and $join[$i] -match "SCENARIO MELEE SAMPLE phase=apart who=join") {
+            $apartSamples++
+            if ($pausedNow) { $pausedSamples++ }
+        }
+    }
+    if ($pausedSamples -ge 5) { $why += "game was PAUSED for $pausedSamples of $apartSamples APART samples ([speed] SET paused=1, bug #17) - nothing could land" }
     # The baseline must be native: guarded-only APART hits mean the join never
     # authored its own cell (cell authority off), so the ratio compares like with like.
     if ($res['apart'].native -eq 0) { $why += "APART had no native hits (guarded $($res['apart'].guarded)) - the join never authored its cell, so there is no native baseline" }

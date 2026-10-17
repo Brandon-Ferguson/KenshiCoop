@@ -599,9 +599,39 @@ void __fastcall userPause_hook(GameWorld* self, bool p) {
     if (!g_speedGuardWrite) snapshotVoteButtons();
 }
 
+// Bug #17 (docs/design/bug17-camera-jump-pause.md): a long camera jump makes
+// the engine pause itself (unguarded togglePause(true)) while it loads the zone
+// the camera landed in, and unpause itself (togglePause(false)) when done. That
+// pause also lights the pause button, which the poll's button detector used to
+// read as a pause CLICK - shared with the peer, then re-applied by the 3 s
+// resend after the engine let go, so both games stayed paused. A pause is
+// classed as the engine's loading pause ONLY when the zone under the camera is
+// not (fully) loaded at the moment of the call; a space-bar pause over a loaded
+// zone is never classed this way. While the hold is set, the button detector
+// ignores the pause highlight and quiet writes keep the engine's own pause
+// instead of unpausing it mid-load. g_loadPauseLocal=false
+// (KENSHICOOP_LOAD_PAUSE_LOCAL=0) restores the old behaviour.
+bool g_loadPauseLocal  = true;
+bool g_engineLoadPause = false;
+
 void __fastcall togglePause_hook(GameWorld* self, bool p) {
     if (speedDbgOn()) speedDbgLog("togglePause", 0.0f, p ? 1 : 0);
+    // Classify BEFORE the engine acts: the camera's zone state is what made it pause.
+    int camLoaded = -1;
+    if (!g_speedGuardWrite && p && g_loadPauseLocal) {
+        float c[3];
+        if (cameraCenter(self, c)) camLoaded = isZoneLoadedAt(self, c[0], c[1], c[2]) ? 1 : 0;
+    }
     g_togglePauseOrig(self, p);
+    if (!g_speedGuardWrite) {
+        bool was = g_engineLoadPause;
+        if (p) { if (camLoaded == 0) g_engineLoadPause = true; }
+        else g_engineLoadPause = false;
+        char b[128]; _snprintf(b, sizeof(b) - 1,
+            "[speed] ENGINE togglePause on=%d camZoneLoaded=%d loadPause=%d->%d",
+            p ? 1 : 0, camLoaded, was ? 1 : 0, g_engineLoadPause ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
     // Save completion can release the engine pause without a user action.
     // Explain that change to the poll fallback, retaining any real intent
     // already captured by the enclosing userPause/setGameSpeed hook.

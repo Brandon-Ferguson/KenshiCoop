@@ -454,6 +454,8 @@ extern bool  g_speedIntentFresh;
 extern float g_speedIntentMult;
 extern bool  g_speedIntentPaused;
 extern int   g_speedIntentKind; // SPEED_INTENT_*
+extern bool  g_loadPauseLocal;  // bug #17 master enable (KENSHICOOP_LOAD_PAUSE_LOCAL)
+extern bool  g_engineLoadPause; // the engine paused itself to load the camera's zone
 extern bool  g_speedIntentSeeded;
 extern bool  g_quietHave;
 extern float g_quietMult;

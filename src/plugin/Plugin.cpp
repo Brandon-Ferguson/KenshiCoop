@@ -2158,6 +2158,10 @@ void mainLoop_hook(GameWorld* gw, float dt) {
         // speed setters so every USER action (button, keyboard pause, simulated
         // click) registers as a vote, while our own quiet applies stay invisible.
         // Installed at gameplay start so the seed reads the save's live speed.
+        coop::engine::setLoadPauseLocal(g_cfg.loadPauseLocal);
+        coopLog(g_cfg.loadPauseLocal
+            ? "[speed] engine loading pause kept local ON"
+            : "[speed] engine loading pause kept local OFF (shared as a vote)");
         if (coop::engine::installSpeedIntentHooks(gw))
             coopLog("[speed] intent hooks installed (setGameSpeed/userPause/togglePause)");
         else

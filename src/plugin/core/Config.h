@@ -306,6 +306,11 @@ struct Config {
     // broadcasts PKT_SPEED_SET. Combat does not clamp the multiplier. "0" is
     // the A/B escape hatch.
     bool          speedSync;
+    // Bug #17 (DEFAULT ON): the engine's own loading pause after a long camera
+    // jump stays local - not shared as a pause vote, not lifted mid-load by the
+    // speed resend. Without it both games stayed paused after the engine had
+    // already unpaused itself. "0" restores that for the A/B.
+    bool          loadPauseLocal;   // KENSHICOOP_LOAD_PAUSE_LOCAL     (on)
 
     // DEPRECATED no-op. Parsed so existing env/manifests do not error; the
     // combat detector still runs for SPEED_IN_COMBAT diagnostics, but it never

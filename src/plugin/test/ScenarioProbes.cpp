@@ -2916,6 +2916,91 @@ private:
 // Outside the bar's walls, well inside the 4608 u zone cell and the 2000 u
 // census sphere, so the host still loads and streams the bar.
 const float FriendIndoorsScenario::OUT_DIST = 1500.0f;
+
+// camera_jump_pause (bug #17 gate, docs/design/bug17-camera-jump-pause.md): a
+// long camera jump makes the engine pause itself while it loads the zone the
+// camera landed in. That pause must stay the jumping client's own and end when
+// the engine ends it - it must not become a shared pause that holds both games.
+// Save 'sync'.
+//   10 s      JUMP  - the host parks its own tab JUMP_DIST u along +x and
+//                     points its camera at the parked leader (as melee_together
+//                     does), which is what triggers the loading pause.
+//   10-50 s   WATCH - 1 Hz on both sides: SCENARIO CAMJUMP SAMPLE paused=0|1.
+// The _off variant runs with KENSHICOOP_LOAD_PAUSE_LOCAL=0 (the old behaviour)
+// and must FAIL the same oracle.
+class CameraJumpPauseScenario : public TimedScenario {
+public:
+    explicit CameraJumpPauseScenario(const char* name)
+        : TimedScenario(name, 0), jumped_(false), cam_(false), nParked_(0),
+          lastSampleMs_(0) {}
+
+    virtual void onStart(const ScenarioContext& ctx) { (void)ctx; }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (ctx.isHost && !jumped_ && ctx.elapsedMs >= JUMP_AT_MS) jump(ctx);
+        if (ctx.elapsedMs >= JUMP_AT_MS && ctx.elapsedMs < WATCH_END_MS &&
+            ctx.elapsedMs - lastSampleMs_ >= 1000) {
+            lastSampleMs_ = ctx.elapsedMs;
+            float m = 0.0f; bool p = false;
+            bool ok = engine::readGameSpeed(ctx.gw, &m, &p);
+            char b[128]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO CAMJUMP SAMPLE who=%s ok=%d paused=%d mult=%.2f t=%lu",
+                ctx.isHost ? "host" : "join", ok ? 1 : 0, (ok && p) ? 1 : 0, m,
+                ctx.elapsedMs);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        unsigned long dur = ctx.isHost ? HOST_DURATION_MS : JOIN_DURATION_MS;
+        if (ctx.elapsedMs >= dur) {
+            passed_ = ctx.isHost ? (jumped_ && nParked_ > 0 && cam_) : true;
+            char b[128]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO CAMJUMP RESULT who=%s parked=%u cam=%d",
+                ctx.isHost ? "host" : "join", nParked_, cam_ ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    void jump(const ScenarioContext& ctx) {
+        jumped_ = true;
+        EntityState sq[MAX_SQUAD];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_SQUAD);
+        int idx = tabLeaderIdx(sq, n, 0);
+        if (idx < 0) { coop::logLine("SCENARIO CAMJUMP JUMP FAILED (no own leader)"); return; }
+        float tx = sq[idx].x + JUMP_DIST, tz = sq[idx].z, ty = sq[idx].y;
+        bool ground = engine::terrainHeightAt(tx, tz, &ty);
+        unsigned int k = 0;
+        Character* lead = 0;
+        for (unsigned int i = 0; i < n; ++i) {
+            if (!tabCtnrEq(sq[i], sq[idx])) continue;
+            Character* c = engine::resolve(sq[i]);
+            if (c && engine::park(c, tx + (float)k * 3.0f, ty, tz, 0.0f)) {
+                ++nParked_;
+                if (!lead) lead = c;
+            }
+            ++k;
+        }
+        cam_ = lead && engine::cameraFocusOn(ctx.gw, lead);
+        char b[160]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO CAMJUMP JUMP members=%u parked=%u at=%.0f,%.0f,%.0f ground=%d cam=%d t=%lu",
+            k, nParked_, tx, ty, tz, ground ? 1 : 0, cam_ ? 1 : 0, ctx.elapsedMs);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    static const unsigned long JUMP_AT_MS       = 10000;
+    static const unsigned long WATCH_END_MS     = 50000;
+    static const unsigned long JOIN_DURATION_MS = 52000;
+    static const unsigned long HOST_DURATION_MS = 54000;
+    static const unsigned int  MAX_SQUAD        = 32;
+    static const float         JUMP_DIST;
+
+    bool          jumped_, cam_;
+    unsigned int  nParked_;
+    unsigned long lastSampleMs_;
+};
+// The melee_together park distance that reproduced the stuck pause 4 of 4 times.
+const float CameraJumpPauseScenario::JUMP_DIST = 6000.0f;
 } // namespace
 
 Scenario* makeProbeScenario(const std::string& name) {
@@ -2923,6 +3008,8 @@ Scenario* makeProbeScenario(const std::string& name) {
     if (name == "cell_probe")   return new CellProbeScenario();
     if (name == "cell_auth_together") return new CellAuthTogetherScenario();
     if (name == "friend_indoors") return new FriendIndoorsScenario();
+    if (name == "camera_jump_pause")     return new CameraJumpPauseScenario("camera_jump_pause");
+    if (name == "camera_jump_pause_off") return new CameraJumpPauseScenario("camera_jump_pause_off");
     if (name == "shop_probe")   return new ShopProbeScenario();
     if (name == "wallet_probe") return new MoneyPoolScenario(/*probe=*/true);
     if (name == "money_sync")   return new MoneyPoolScenario(/*probe=*/false);

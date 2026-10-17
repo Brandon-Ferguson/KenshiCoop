@@ -2290,6 +2290,12 @@ bool consumeSpeedIntent(GameWorld* gw, float* mult, bool* paused, int* kind = 0)
 // is live. Returns false when any target fails to resolve or hook.
 bool installSpeedIntentHooks(GameWorld* gw);
 
+// Bug #17 (KENSHICOOP_LOAD_PAUSE_LOCAL, DEFAULT ON): keep the engine's own
+// loading pause (togglePause(true) while the camera's zone is not loaded)
+// local - never captured as a pause vote, never lifted mid-load by a quiet
+// write. false restores the old behaviour (the A/B arm).
+void setLoadPauseLocal(bool on);
+
 // Spike probe (KENSHICOOP_SPEED_PROBE=1): read the MainBar speed-button
 // selected states into out (one char per button, '0'/'1', NUL-terminated;
 // cap n-1 buttons). Returns the button count read, -1 when the GUI isn't up.

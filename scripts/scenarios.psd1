@@ -2086,6 +2086,33 @@
             Tier = 'probe'; WanVariant = $false
         }
 
+        # camera_jump_pause: bug #17 gate (docs/design/bug17-camera-jump-pause.md).
+        # The host parks its tab 6000 u away and its camera jumps with it, which
+        # makes the engine pause itself to load the new zone. FAILs when the
+        # join gets paused (the loading pause was shared) or the host is still
+        # paused at the end (it never lifted), or when no loading pause
+        # happened. 54 s after arming.
+        camera_jump_pause = @{
+            Save = 'sync'; Setup = ''; Tolerance = 20.0
+            Seconds = 140; KillGraceSec = 110
+            PrimaryGate = 'camera_jump_pause'
+            Gating   = @('camera_jump_pause')
+            Advisory = @('clock_sync')
+            DiagEnv = @{ KENSHICOOP_DEBUG_SPEED = '1' }
+            Tier = 'probe'; WanVariant = $false
+        }
+        # The A/B arm: the old behaviour (loading pause shared as a vote). Must
+        # FAIL camera_jump_pause's oracle, or the gate proves nothing.
+        camera_jump_pause_off = @{
+            Save = 'sync'; Setup = ''; Tolerance = 20.0
+            Seconds = 140; KillGraceSec = 110
+            PrimaryGate = 'camera_jump_pause_off'
+            Gating   = @('camera_jump_pause_off')
+            Advisory = @('clock_sync')
+            DiagEnv = @{ KENSHICOOP_DEBUG_SPEED = '1'; KENSHICOOP_LOAD_PAUSE_LOCAL = '0' }
+            Tier = 'probe'; WanVariant = $false
+        }
+
         # ---- inventory ---------------------------------------------------------------
         inv_snapshot_cursor = @{
             DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }

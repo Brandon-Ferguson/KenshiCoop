@@ -2936,3 +2936,58 @@ function Test-FriendIndoors {
                             joinOpenBase = $jOpen['base']; joinOpenWatch = $jOpen['watch'];
                             copyInside = $copyIn; joinCopyInside = $jCopyIn; hostOutside = $hOut; joinInside = $jIn } -Detail $detail)
 }
+
+# camera_jump_pause / camera_jump_pause_off (bug #17 gate,
+# docs/design/bug17-camera-jump-pause.md): after the host's camera jumps 6000 u
+# with its parked squad, the engine pauses itself to load the new zone. That
+# pause must stay the host's own and end when the engine ends it.
+#   FAIL (setup) - the host camera never jumped, or the engine never paused for
+#                  the jump ([speed] ENGINE togglePause on=1 after the JUMP line):
+#                  without the loading pause there is nothing to test.
+#   FAIL (gate)  - the join was paused in more than 3 samples (the pause was
+#                  shared), or the host was still paused in any of the last 10
+#                  samples (the pause never lifted).
+# The _off arm (KENSHICOOP_LOAD_PAUSE_LOCAL=0) is expected to FAIL the gate.
+function Test-CameraJumpPause {
+    param([string]$HostFile, [string]$JoinFile, [string]$GateName = "camera_jump_pause")
+    $why = @()
+    $hostLines = @(Get-Content -Path $HostFile -ErrorAction SilentlyContinue)
+    $join      = @(Get-Content -Path $JoinFile -ErrorAction SilentlyContinue)
+
+    $jumpIdx = -1
+    for ($i = 0; $i -lt $hostLines.Count; $i++) {
+        if ($hostLines[$i] -match "SCENARIO CAMJUMP JUMP .* cam=1") { $jumpIdx = $i; break }
+    }
+    if ($jumpIdx -lt 0) { $why += "host camera never jumped (no CAMJUMP JUMP ... cam=1)" }
+    $engine = @()
+    if ($jumpIdx -ge 0) {
+        $engine = @($hostLines[$jumpIdx..($hostLines.Count - 1)] | Select-String -Pattern "\[speed\] ENGINE togglePause on=1 camZoneLoaded=(-?\d) loadPause=(\d)->(\d)")
+        if ($engine.Count -eq 0) { $why += "the engine never paused for the jump - no loading pause to test" }
+    }
+
+    function Get-Paused($lines, [string]$who) {
+        $out = @()
+        foreach ($m in ($lines | Select-String -Pattern "SCENARIO CAMJUMP SAMPLE who=$who ok=1 paused=(\d)")) { $out += [int]$m.Matches[0].Groups[1].Value }
+        return $out
+    }
+    $hP = @(Get-Paused $hostLines 'host')
+    $jP = @(Get-Paused $join 'join')
+    if ($hP.Count -lt 20 -or $jP.Count -lt 20) { $why += "too few samples (host $($hP.Count), join $($jP.Count); need 20 each)" }
+    $jPaused = @($jP | Where-Object { $_ -eq 1 }).Count
+    $hPaused = @($hP | Where-Object { $_ -eq 1 }).Count
+    $hTail = if ($hP.Count -ge 10) { @($hP[($hP.Count - 10)..($hP.Count - 1)] | Where-Object { $_ -eq 1 }).Count } else { -1 }
+    if ($jPaused -gt 3) { $why += "join was paused in $jPaused of $($jP.Count) samples after the host's camera jump - the loading pause was shared" }
+    if ($hTail -gt 0) { $why += "host still paused in $hTail of its last 10 samples - the loading pause never lifted" }
+
+    $shared = @($hostLines | Select-String -Pattern "\[speed\] REQ mult=\S+ paused=1").Count
+    $first = if ($engine.Count -gt 0) { $engine[0].Line -replace '^.*\[speed\] ', '' } else { 'none' }
+    Write-Host "    FINDING: engine pause after the jump: $first ($($engine.Count) engine pause call(s))"
+    Write-Host "    FINDING: host paused $hPaused of $($hP.Count) samples (last 10: $hTail); join paused $jPaused of $($jP.Count); host pause votes (REQ paused=1) $shared"
+
+    $v = if ($why.Count -eq 0) { "PASS" } else { "FAIL" }
+    $detail = $why -join "; "
+    Write-Host "  CAMERA-JUMP-PAUSE $v - hostPaused=$hPaused joinPaused=$jPaused hostTail=$hTail votes=$shared $detail"
+    return (Add-GateResult -Name $GateName -Status $v `
+                -Metrics @{ hostPaused = $hPaused; joinPaused = $jPaused; hostTail = $hTail;
+                            pauseVotes = $shared; engineCalls = $engine.Count } -Detail $detail)
+}

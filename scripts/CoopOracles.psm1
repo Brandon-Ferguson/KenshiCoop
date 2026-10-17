@@ -266,6 +266,8 @@ function Invoke-OneOracle {
         "world_parity"  { return (Test-WorldParity     -HostFile $HostLog -JoinFile $JoinLog) }
         "cell_probe"    { return (Test-CellProbe       -HostFile $HostLog -JoinFile $JoinLog) }
         "friend_indoors" { return (Test-FriendIndoors  -HostFile $HostLog -JoinFile $JoinLog) }
+        "camera_jump_pause"     { return (Test-CameraJumpPause -HostFile $HostLog -JoinFile $JoinLog) }
+        "camera_jump_pause_off" { return (Test-CameraJumpPause -HostFile $HostLog -JoinFile $JoinLog -GateName "camera_jump_pause_off") }
         "camp_approach" { return (Test-CampApproach    -HostFile $HostLog -JoinFile $JoinLog) }
         "mint_dist"     { return (Test-MintDistance    -JoinFile $JoinLog) }
         "anti_zombie"   { return (Test-AntiZombie      -HostFile $HostLog -JoinFile $JoinLog) }
@@ -510,7 +512,7 @@ Export-ModuleMember -Function @(
     "Get-WnpcRows", "Get-WorldRows", "Group-WnpcSamples", "Test-FollowTravel", "Test-TravelParity",
     "Test-SplitFar", "Test-SplitFar2", "Test-DualDrive", "Test-RunApart",
     "Get-TownArriveData", "Get-TownAuditRows", "Test-TownArrive", "Test-TownPopParity",
-    "Test-WorldParity", "Test-CellProbe", "Test-FriendIndoors",
+    "Test-WorldParity", "Test-CellProbe", "Test-FriendIndoors", "Test-CameraJumpPause",
     "Test-CampApproach",
     "Test-MintDistance", "Test-AntiZombie", "Test-Lifecycle",
     "Get-PanelConnects", "Get-PanelIntents", "Test-PanelConfig",

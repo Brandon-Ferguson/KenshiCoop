@@ -641,9 +641,22 @@ bool writeGameSpeed(GameWorld* gw, float mult, bool paused) {
     }
 }
 
+void setLoadPauseLocal(bool on) {
+    g_loadPauseLocal = on;
+    if (!on) g_engineLoadPause = false;
+}
+
 bool writeGameSpeedQuiet(GameWorld* gw, float mult, bool paused) {
     if (!gw || !g_setFrameSpeedMultFn || !g_userPauseFn) return false;
     if (mult <= 0.0f) paused = true; // wire convention: speed 0 == paused
+    // Bug #17: never lift the engine's own loading pause mid-load (the 3 s
+    // resend would otherwise unpause it). Only KEEPS a pause the engine
+    // already holds; a running engine is never paused by this.
+    if (!paused && g_engineLoadPause) {
+        float em = 0.0f; bool ep = false;
+        if (readGameSpeed(gw, &em, &ep) && ep) paused = true;
+        else g_engineLoadPause = false;
+    }
     g_speedGuardWrite = true; // our own write: the intent hooks must not see it
     bool ok;
     __try {
@@ -707,6 +720,8 @@ bool consumeSpeedIntent(GameWorld* gw, float* mult, bool* paused, int* kind) {
     //        vote). Its value also equals the engine state, by definition.
     float em = 0.0f; bool ep = false;
     if (!readGameSpeed(gw, &em, &ep)) return false;
+    // Bug #17: a running engine ends any loading-pause hold, however it resumed.
+    if (!ep) g_engineLoadPause = false;
     bool engineDiff = g_quietHave &&
         (ep != g_quietPaused ||
          (!ep && em > 0.0f && fabsf(em - g_quietMult) > 0.01f));
@@ -732,6 +747,20 @@ bool consumeSpeedIntent(GameWorld* gw, float* mult, bool* paused, int* kind) {
             g_quietMult, g_quietPaused ? 1 : 0, g_speedCombatHint ? 1 : 0,
             nBtn, btn, g_voteBtnN, g_voteBtn);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+    // Bug #17: the engine's own loading pause lights the pause button (index
+    // 0). While that pause holds, the newly lit pause button is the engine's,
+    // not a click (a pause click on an already-paused game changes nothing).
+    // The caller's reconcile then puts the vote highlight back. A tier click
+    // (index > 0) still counts.
+    if (btnDiff && !engineDiff && g_engineLoadPause && ep) {
+        int nIdx = -1;
+        for (int i = 0; i < nBtn; ++i)
+            if (btn[i] == '1' && g_voteBtn[i] != '1') { nIdx = i; break; }
+        if (nIdx == 0) {
+            btnDiff = false;
+            if (speedDbgOn()) coop::logLine("[speeddbg] poll pause highlight is the engine's loading pause - not a click");
+        }
     }
     if (!engineDiff && !btnDiff) return false;
     if (engineDiff) {

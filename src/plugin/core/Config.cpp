@@ -274,6 +274,7 @@ void loadConfig(Config& c) {
     // independent flag, combat does not cap the multiplier. "0" is the A/B
     // escape hatch. speed_probe / time_probe force it OFF via DiagEnv.
     c.speedSync = envOr("KENSHICOOP_SPEED_SYNC", "1") != "0";
+    c.loadPauseLocal = envOr("KENSHICOOP_LOAD_PAUSE_LOCAL", "1") != "0";
     // Deprecated: still parsed (default ON so old manifests are unchanged) but
     // Replicator::syncSpeed never applies a combat 1x clamp.
     c.speedCombatCap = envOr("KENSHICOOP_SPEED_COMBAT_CAP", "1") != "0";

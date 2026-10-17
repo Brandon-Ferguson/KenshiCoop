@@ -1,6 +1,6 @@
 # Bug #17 design: a long camera jump pauses both players
 
-Status: **step 1 done: cause confirmed (engine loading pause misread as a pause-button click, then re-applied by the 3 s resend); fix not started** — October 16, 2026.
+Status: **fix A implemented and built (verify passes); not yet run in game** — October 16, 2026.
 Bug source: found during bug #16 (docs/design/bug16-host-black-interior.md);
 docs/PROJECT_BRIEF.md bug table row 17.
 
@@ -134,3 +134,48 @@ that the pause button's highlight now belongs to the engine. Then:
 Only the input classification changes. A real pause click (button or space bar)
 still goes through the existing paths, which do not depend on this flag. Plus
 the off switch and the checks under "Safety checks for step 2".
+
+## Step 2 - fix A as implemented (built, not yet run)
+
+The space bar also reaches the engine through `togglePause`, so "the engine
+called togglePause" alone cannot tell a loading pause from a real press. The
+fix therefore keys on a condition only a loading pause meets: **the zone under
+the camera is not fully loaded** at the moment of the call
+(`isZoneLoadedAt(camera centre)` is false while unloaded or mid-load).
+
+- `togglePause_hook` (EngineInternal.cpp): before the engine acts, on an
+  unguarded `togglePause(true)` it reads the camera centre and that zone's load
+  state. Not loaded: set the hold `g_engineLoadPause`. Any unguarded
+  `togglePause(false)` clears it. Every unguarded call logs `[speed] ENGINE
+  togglePause on= camZoneLoaded= loadPause=a->b`.
+- `consumeSpeedIntent` (EngineCharState.cpp): while the hold is set and the
+  engine is paused, a newly lit **pause** button (index 0) is not a click. A
+  speed-tier button (index > 0) still counts. A running engine clears the hold
+  however it resumed.
+- `writeGameSpeedQuiet`: while the hold is set and the engine is paused, a
+  quiet write keeps the pause instead of lifting it mid-load. It never pauses a
+  running engine; if the engine is already running, the hold is cleared.
+- Off switch `KENSHICOOP_LOAD_PAUSE_LOCAL=0` (Config, harness-whitelisted):
+  no classification happens, so behaviour is exactly the old one apart from
+  the extra log line.
+- If the camera or zone read fails, nothing is classed as a loading pause
+  (today's behaviour).
+
+Known edge case (accepted): a player who presses pause while the engine's
+loading pause is already in effect does not share that pause, and the game
+resumes when the engine finishes loading. Pausing an already-paused game was a
+no-op before, too.
+
+Tests:
+
+- `camera_jump_pause` (gate) and `camera_jump_pause_off` (A/B arm, switch
+  off): the host parks 6000 u away with its camera. `Test-CameraJumpPause`
+  FAILs when the join is paused in more than 3 samples or the host is still
+  paused in its last 10 samples, and FAILs setup when no engine loading pause
+  happened. The off arm must FAIL.
+- melee_together's oracle now names a paused APART explicitly: "game was PAUSED
+  for N of M APART samples". It flags runs 230209 and 231422 (30 of 30) and
+  leaves 221816 alone.
+- Synthetic oracle cases: pass, shared, stuck and no-engine-pause all classify
+  correctly.
+- The shipped Release DLL carries the fix; the gate scenario is Harness-only.
