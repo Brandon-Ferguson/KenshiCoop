@@ -1,6 +1,6 @@
 # Bug #16 design: a building goes black when watched from the other client
 
-Status: **step 1 (read-only probe + friend_indoors scenario) written and built; verify passes; not yet run in game** —
+Status: **step 1 run once (20261016_223645): the melee black screen is explained; H1/H2 not yet tested because the joiner never stood inside** —
 October 16, 2026.
 Bug source: seen by Brandon during melee_together runs; docs/PROJECT_BRIEF.md bug
 table row 16.
@@ -135,3 +135,41 @@ This touches what the player sees, so before it ships:
    crash/fault counters.
 5. A line-by-line review of the diff before deploy, and a manual look in both
    windows by Brandon.
+
+## Step 1 result - run 20261016_223645 (October 16, 2026)
+
+The oracle FAILed its setup checks, but the rows answered the bigger question.
+
+| Time | Host (own leader Flashbox) | Join (own leader Remote Player 1) |
+|---|---|---|
+| BASE | Flashbox inside the bar (`0.2069.11111.95.2594726656`), bar drawn open | Remote Player 1 **outdoors** (`inside=11.0.0.0.0`); its copy of Flashbox inside the bar; bar drawn open |
+| 22:38:11.9 | host parks Flashbox 1500 u out | |
+| 22:38:12.9 | Flashbox outdoors; bar drawn **closed** (open 1 -> 0 within a second) | its copy of Flashbox outdoors within the same second |
+| WATCH | host camera follows the joiner; the bar stays closed | both leaders outdoors |
+
+What this shows:
+
+1. **The joiner's leader is never inside the bar in the `sync` save.** Both
+   clients agree it stands just outside (the ~158 u leader distance
+   melee_together logs). Only the host's leader starts inside.
+2. **The melee_together black screen is the scenario, not co-op.** In APART the
+   host's camera stays where Flashbox stood inside the bar (park moves the
+   body, not the camera). Once Flashbox leaves, the host closes the bar within a
+   second, and nobody from either client is inside. The camera is left inside a
+   closed building, which draws the black void with only the characters and
+   the outside terrain. That matches both timed sightings. The fix belongs in the
+   scenario (step 3): refocus the camera after the park.
+3. **A teleported or driven body's indoor state does update.** The host's own
+   leader went from inside to outdoors one second after `park`, and the join's
+   copy of it followed in the same second. So copies are not stuck with a stale
+   indoor state (evidence against H1, for leaving).
+4. **On the join, the host's copy alone opened the bar.** With none of the
+   join's own characters inside, the bar was drawn open while the host's copy
+   stood in it (evidence against the real-play bug). Caveat: the join had that
+   copy selected (`sel=1` on every join row: the save's selection; the camera
+   focus does not change it), so selection may be what opened it.
+
+Not yet tested: a client watching the friend inside a building when that
+friend's character is not selected. Next: the joiner walks its leader into the
+bar with a normal move order (`orderMoveTo`, so it enters the way a player
+would) before the host leaves; plus the step 3 camera refocus in melee_together.
