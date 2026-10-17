@@ -1,6 +1,6 @@
 # Bug #16 design: a building goes black when watched from the other client
 
-Status: **step 1 run once (20261016_223645): the melee black screen is explained; H1/H2 not yet tested because the joiner never stood inside** —
+Status: **not a co-op bug: friend_indoors run 2 shows the host draws the bar open with only the joiner inside; the black screen was the melee_together camera. Open: one melee_together run with the camera fix had no APART hits** —
 October 16, 2026.
 Bug source: seen by Brandon during melee_together runs; docs/PROJECT_BRIEF.md bug
 table row 16.
@@ -186,3 +186,37 @@ would) before the host leaves; plus the step 3 camera refocus in melee_together.
 - melee_together (step 3): the host's park now also points its camera at its
   parked leader (`SCENARIO MELEE PARK ... cam=1`), so APART no longer leaves the
   host camera inside the bar it just left.
+
+## Step 1b results (October 16, 2026)
+
+**friend_indoors, run 20261016_225407: PASS, bug NOT reproduced.**
+
+- The joiner's leader walked into the bar on the first move order and stayed
+  inside through OUT and WATCH (inside share 1.0 on both).
+- After the host's leader left, the host still drew the bar **open** in every
+  OUT and WATCH sample (open 1.0), with only the joiner inside.
+- The host's copy of the joiner was marked inside the bar in every WATCH sample
+  (1.0), and the host did not have it selected (0.0), so selection played no
+  part.
+
+So the friend's characters keep their indoor state on the other client, and
+that alone keeps the interior open. Neither H1 nor H2 holds; there is no
+real-play bug here, and no step-2 fix is needed. Bug #16 was the
+melee_together scenario leaving the host camera inside a building nobody was in.
+
+**melee_together with the camera fix, run 20261016_225651: FAIL (no APART baseline).**
+
+- The park line reads `cam=1`: the host camera followed its parked leader.
+- TOGETHER was normal (28.9 hits/min).
+- APART: the joiner fought its target (`4,1276245120`, the Ninja Guard by
+  earlier runs) for 29 s and **no melee landed either way**. There were zero
+  `[dmg] HIT` lines in the phase, although the target was join-authored as cell
+  authority intends (`[med] SEND ... npc=1` from the join).
+- The five earlier runs (camera left at the bar) all had APART hits: 10, 6, 12,
+  2 and 10.
+
+One run cannot tell noise from an effect. A plausible link: the host's camera
+was the host's interest anchor on the bar, and Kenshi also keeps zones loaded
+around the camera, so moving it changes what the host keeps active there. Next:
+rerun melee_together a couple of times before deciding whether the camera fix
+stays.
