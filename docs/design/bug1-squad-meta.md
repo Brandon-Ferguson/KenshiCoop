@@ -299,6 +299,37 @@ covers squad name, faction name and jobs together):
 The switch alone decides whether the join's squad names, faction name and jobs
 survive the host's save. Health PASS on both sides in both runs.
 
+## Regression check (smoke tier, October 16, 2026)
+
+`scripts\regress.ps1 -Tier smoke -SkipBuild` on `fix/squad-meta-persist` at
+`aad9033` (Harness, protocol 73, local two-client loopback; 41 min), plus
+`squad_meta_persist`:
+
+- Unit layer: prototest **636/636 PASS**.
+- **13 of 15 smoke scenarios PASS**: `combat_kill`, `inv_bidir`,
+  `inv_backpack_drop`, `inv_dropfull`, `inv_nested_bag`, `inv_overflow`,
+  `inv_regear`, `inv_regear_forget`, `inv_regear_refuse`, `world_weapon_drop`,
+  `world_item_burst`, `world_item_stale`, `world_pickup_mirror`.
+- `squad_meta_persist`: **PASS** (all three parts).
+- `coop_presence`: **FLAKY** — first attempt FAIL on `snap_rate` (2 NPC hard
+  snaps over 25 s = 4.79/min, limit 3), retry PASS.
+- `npc_sync`: **FAIL** both attempts on `rest_flap` (join NPCs flipping
+  walk→rest 1750/min, then 724/min; limit 60).
+
+Both failures were rerun on the unchanged base, `brandon-fixes` at `eaf14f8`
+(Harness, protocol 71), with the same harness:
+
+| Scenario | This branch | Base | Classification |
+|---|---|---|---|
+| `npc_sync` | FAIL `rest_flap` 1750/min, retry 724/min | FAIL `rest_flap` 1529/min (`20261016_182535`), 774/min (`20261016_182810`) | **Pre-existing** |
+| `coop_presence` | FAIL `snap_rate` 4.79/min (npc=2), retry PASS | FAIL `snap_rate` 4.79/min, npc=2 (`20261016_183043`) | **Pre-existing, flaky** |
+
+Same gates failing at comparable values on code without this branch, and both
+concern NPC motion/animation on the join, which no Bug #1 channel touches. So
+this branch introduces no smoke regression. Both are tracked as a separate
+investigation (not part of Bug #1). The full tier (97 more scenarios plus the
+WAN variants) has not been run yet.
+
 ## Steps (branch `fix/squad-meta-persist`, one commit each)
 
 1. **Probe scenario `squad_meta_probe`** — read/write each value on own tabs,
