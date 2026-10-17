@@ -220,3 +220,33 @@ was the host's interest anchor on the bar, and Kenshi also keeps zones loaded
 around the camera, so moving it changes what the host keeps active there. Next:
 rerun melee_together a couple of times before deciding whether the camera fix
 stays.
+
+## Camera-fix recheck: melee_together x2 (October 16, 2026)
+
+| Run | Camera follows parked host | Join's copy of host leader frozen in APART (`combat-skip`) | Joiner's APART native hits |
+|---|---|---|---|
+| 20261016_213946 | no | 0 | 10 |
+| 20261016_214243 | no | 27 | 6 |
+| 20261016_220531 | no | 13 | 12 |
+| 20261016_221532 | no | 31 | 2 |
+| 20261016_221816 | no | 0 | 10 |
+| 20261016_225651 | **yes** | 0 | **0** |
+| 20261016_230209 | **yes** | 146 | **0** |
+| 20261016_230458 | **yes** | 145 | **0** |
+
+- **The camera change does affect APART:** 3 of 3 runs with it landed no melee
+  at all in 29-30 s of fighting, against 5 of 5 runs without it that landed
+  hits. In those runs there were no `[dmg] HIT` lines in either direction.
+- The frozen host-leader copy is **not** the cause: it also appears in old runs
+  that landed hits, and is absent from 225651, which landed none. It is a
+  separate desync: on the join, the host's leader copy stays pinned in a local
+  fight at the bar after the host has left (run 230458 measured the two leaders
+  11 u apart on the join while the host had its leader 6000 u away). It fits
+  the "slightly desynced" characters Brandon saw.
+- What the camera change alters on the host: its camera, and with it Kenshi's
+  camera zone activation and the mod's camera interest anchor, leaves the bar
+  together with its last character. That is what happens in **real play**
+  whenever the host walks away from a fight. The old melee_together, which left
+  the host camera on the bar, was the unrealistic case. So the zero-hit APART
+  may be a real co-op bug (fighting in your own cell while the host is far
+  away), not a test problem. Not yet diagnosed.
