@@ -125,6 +125,15 @@ ring stance near the target) is unaffected.
   `[combat] order`. It would be run in `combat_crowd`, `combat_battle`,
   `assault_travel` and `mint_aggro`, to find the largest reach at which real
   fights start versus the ~440 u phantom ones.
+- **Probe (done, step 1):** each `[combat] order` is followed by its own line:
+  ```
+  [combat] reach hand=<i,s> tgt=<i,s> reach=<u> copyReach=<u> srcVel=<u/s> wait=<0|1> isSquad=<0|1> n=<orders>
+  ```
+  - `reach`: the streamed attacker pose to the target's local pose.
+  - `copyReach`: our copy to the same target.
+  - `-1`: the target could not be read.
+  - It is read-only, and it is a separate line so the parsers keyed on the
+    `[combat] order` line are untouched.
 - **A/B gate:** `mint_aggro` x3 with the gate on and x3 with it off.
   `one_sided_fight` must fail with the gate off and pass with it on.
 - **Regression:**
