@@ -199,6 +199,53 @@ ring stance near the target) is unaffected.
   - Open question: how much of "stuck" is the scenario's park onto a rise.
     In real play, NPC pathing failures do happen, and the join's copy, placed
     from the stream, may not be stuck in the same way.
+- **Offline sizing (35 saved combat runs, host 1 Hz `MEMBER` series).**
+  - **Proxy measure.** The target is not logged for crowd and battle fights,
+    so the nearest other tracked body stands in for it. A real fight
+    (`combat_crowd`, `combat_battle`, `combat_kill`, `assault_travel`) is
+    flagged when the host attacker is on a melee task, has moved under 5 u
+    in 2 s, and has nothing within 50 u.
+    - The longest such streak is 3 samples (`combat_crowd` 125517), and
+      2 samples in `combat_battle`.
+    - Of 1,281-1,971 melee samples per battle run, 1-16 qualify.
+  - **Exact measure.** Possible only where the scenario logs the enemy's
+    target (`mint_aggro` `enemystate`). It finds 0 even for the known stuck
+    enemy 4. That body reads in combat only intermittently at 1 Hz (task
+    65024 at 13:57:46 and 13:57:55 only, idle between), so 1 Hz host
+    samples are too coarse to time the stuck state. What they do show
+    clearly is that it never moved: 0 u from 13:57:46 to 13:58:02.
+  - **Consequence.** A stillness *duration* threshold cannot be sized from
+    these logs, and a duration rule would not stop the phantom anyway: the
+    join's copy charges on the very first combat sample. The rule has to be
+    about movement **at the moment of the replay**.
+- **Proposed rule (stuck-attacker mirror).** In the `taskIsCombat` branch,
+  replay the host's combat intent (order and pursuit) only when at least one
+  of these holds:
+  1. **In reach:** the host attacker's streamed pose is within **60 u** of the
+     target's local pose. That is melee range plus slack; the reach probe put
+     the median real order at 21-31 u.
+  2. **Moving:** the host attacker's velocity peak (`d.velPeak`, the existing
+     ~1 s decaying peak) is at least **2 u/s**. A stuck body reads exactly 0
+     (enemy 4 held -50705,1629,2651 for 16 s). A real charger crosses this
+     within its first streamed segment.
+  3. **Ranged:** the local copy is in ranged mode (`readCombat().ranged`). A
+     crossbow user legitimately stands still far from its target, so it is
+     left to today's behaviour.
+
+  Otherwise the copy **mirrors the host**:
+  - no attack order is issued, and the body takes the ordinary drive
+    (AI-suspended, tracking the host's pose);
+  - if it was already armed, it disarms immediately (clearGoals), as the
+    existing hold BREAK does, instead of running the 4 s hold with its AI
+    live;
+  - it logs `[combat] mirror hand=… reach=… vel=…` once per episode.
+
+  - **Cost to real fights:** a real charge starts on the join when the host
+    body's first movement arrives in the stream. That is up to one stream
+    segment later (≤50 ms near tier, ~0.5-1 s mid tier). A real attacker
+    standing still beyond 60 u (proxy: at most 3 samples) is mirrored for
+    that time, which matches what its owner's body is doing.
+  - **Off switch:** `KENSHICOOP_COMBAT_STUCK_MIRROR=0`.
 - **A/B gate:** `mint_aggro` x3 with the gate on and x3 with it off.
   `one_sided_fight` must fail with the gate off and pass with it on.
 - **Regression:**
