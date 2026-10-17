@@ -1,0 +1,63 @@
+KenshiCoop - play Kenshi together
+=================================
+
+This is the co-op mod for Kenshi. It is one file, KenshiCoop-Setup.exe, and it
+sets everything up for you. It takes about 2 minutes.
+
+BEFORE YOU START
+  - Kenshi installed on Steam
+  - Steam open and signed in
+  - Kenshi CLOSED
+
+
+INSTALLING
+----------
+1. Download KenshiCoop-Setup.exe.
+   If your browser or Google Drive warns that it isn't commonly downloaded or
+   can't be scanned, choose "Keep" or "Download anyway".
+
+2. Double-click it.
+   Windows may show a blue box saying "Windows protected your PC". That's only
+   because the file is new and unsigned, not because anything is wrong.
+   Click "More info", then "Run anyway".
+   If your antivirus blocks it, let me know what it says.
+
+3. A small "KenshiCoop Setup" window opens. It should say "Kenshi found:"
+   with your Kenshi folder.
+
+4. Click "Install". It backs up your saves first (about a minute), then
+   installs everything. When it says "KenshiCoop is installed", click OK and
+   close the window.
+
+
+CHECKING IT WORKED
+------------------
+5. Start Kenshi from Steam like normal, and click OK in the little Kenshi
+   launcher window.
+
+6. On the main menu, look at the bottom-right corner. It should say:
+       RE_Kenshi 0.3.5 - Kenshi 1.0.65
+
+Please send me back:
+  - a screenshot of the setup window after it finishes (the text in the box)
+  - a screenshot of the main menu showing that bottom-right text
+
+
+PLAYING TOGETHER
+----------------
+When we're ready, start Kenshi and wait at the main menu.
+Press F2, type your name, choose "Client" and "Steam", paste the Steam ID I
+send you, and click "Connect". You'll get my world automatically - no need to
+load a save.
+
+
+IF SOMETHING GOES WRONG
+-----------------------
+Screenshot whatever message you see and send it to me. Nothing in your game is
+changed if the setup stops partway.
+Your save backup is in:  Documents > KenshiCoop backups
+
+
+TO UNDO IT
+----------
+Run KenshiCoop-Setup.exe again and click "Uninstall".

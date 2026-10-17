@@ -117,3 +117,7 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $Out)) { throw "csc fai
 $o = Get-Item -LiteralPath $Out
 Write-Host ("Built {0}  {1:N0} bytes  sha256={2}" -f $o.FullName, $o.Length, (Get-FileHash -LiteralPath $Out -Algorithm SHA256).Hash)
 Write-Host "Version $Version, protocol from Wire.h, RE_Kenshi 0.3.5 bundled."
+# The player instructions go next to the exe, to share alongside it.
+$readme = Join-Path $PSScriptRoot 'READ ME FIRST - KenshiCoop.txt'
+Copy-Item -LiteralPath $readme -Destination (Split-Path $Out -Parent) -Force
+Write-Host "Copied '$(Split-Path $readme -Leaf)' next to it."
