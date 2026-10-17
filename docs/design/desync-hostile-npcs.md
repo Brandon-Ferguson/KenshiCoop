@@ -224,9 +224,13 @@ ring stance near the target) is unaffected.
   1. **In reach:** the host attacker's streamed pose is within **60 u** of the
      target's local pose. That is melee range plus slack; the reach probe put
      the median real order at 21-31 u.
-  2. **Moving:** the host attacker's velocity peak (`d.velPeak`, the existing
-     ~1 s decaying peak) is at least **2 u/s**. A stuck body reads exactly 0
-     (enemy 4 held -50705,1629,2651 for 16 s). A real charger crosses this
+  2. **Moving:** the host attacker's streamed speed is at least **2 u/s**.
+     That is the `srcVel` the combat branch already derives from
+     `d.interp.latest()`, held for 1 s after it was last above the line, so
+     a pause between steps does not flip the rule. `d.velPeak` cannot be
+     used: it is updated only after the combat branch, which `continue`s, so
+     it is stale for any body in combat. A stuck body reads exactly 0 (enemy
+     4 held -50705,1629,2651 for 16 s). A real charger crosses the line
      within its first streamed segment.
   3. **Ranged:** the local copy is in ranged mode (`readCombat().ranged`). A
      crossbow user legitimately stands still far from its target, so it is
