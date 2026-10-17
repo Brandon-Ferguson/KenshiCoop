@@ -1241,7 +1241,69 @@ void Replicator::applyTargets(GameWorld* gw) {
         // graded bands (leave / walk-converge / logged teleport). Combatants skip the
         // AI-suspend path below (their AI must run to animate), reached only via this
         // early `continue`.
-        if (coop::taskIsCombat(out.task)) {
+        // ---- Stuck-attacker mirror (hostile-squad desync, 2026-10-17) ----------
+        // The owner streams a combat intent whenever its body reads engaged with
+        // a target - including a body that holds a target it cannot reach and
+        // never moves (mint_aggro: enemy 4 sat at its park spot for 16 s with
+        // its task flickering melee/idle while the host showed no fight). Our
+        // copy CAN move, so replaying that intent sent it charging into a fight
+        // only this screen saw (nhoral#34/#54). Mirror the owner instead: no
+        // order, no pursuit, AI-suspended on the ordinary drive, until the
+        // owner's body is within reach of its target or moving. Exempt: player
+        // characters (player-authored orders), WAIT stances (ring, no charge),
+        // ranged copies (a crossbow legitimately stands off), and a target we
+        // cannot read (no evidence - keep today's behaviour).
+        bool combatMirror = false;
+        if (stuckMirror_ && !isSquad && coop::taskIsCombat(out.task) &&
+            !coop::taskIsCombatWait(out.task)) {
+            { EntityState nn; float vx = 0.0f, vy = 0.0f, vz = 0.0f;
+              if (d.interp.latest(&nn, &vx, &vy, &vz) &&
+                  std::sqrt(vx * vx + vy * vy + vz * vz) >= COMBAT_MIRROR_MOVE_VEL)
+                  d.combatMoveMs = now; }
+            bool moving = d.combatMoveMs != 0 &&
+                          (now - d.combatMoveMs) < COMBAT_MIRROR_MOVE_HOLD_MS;
+            float reach = -1.0f;
+            if (!moving) {
+                Key tk; tk.t = out.sType; tk.c = out.sContainer;
+                tk.cs = out.sContainerSerial; tk.i = out.sIndex; tk.s = out.sSerial;
+                Character* tc = resolveEventChar(tk);
+                float tx = 0.0f, ty = 0.0f, tz = 0.0f;
+                if (tc && engine::readPos(tc, &tx, &ty, &tz))
+                    reach = dist3(out.x, out.y, out.z, tx, ty, tz);
+            }
+            if (!moving && reach > COMBAT_MIRROR_REACH) {
+                engine::CombatRead rc;
+                bool ranged = engine::readCombat(c, &rc) && rc.ranged;
+                combatMirror = !ranged;
+            }
+            if (combatMirror && d.combatMirrorSince == 0) {
+                d.combatMirrorSince = now;
+                char b[192]; _snprintf(b, sizeof(b) - 1,
+                    "[combat] mirror START hand=%u,%u tgt=%u,%u reach=%.0f armed=%d",
+                    out.hIndex, out.hSerial, out.sIndex, out.sSerial, reach,
+                    d.combatArmed ? 1 : 0);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            // From here on the body is driven as what its owner visibly is: a
+            // body standing at rest. The synthetic combat task must not reach
+            // applyRest, which would try to inject it as a pose (and detach
+            // the body from town AI) - before the mirror, every combat tick
+            // left through the combat branch, so it never saw one.
+            if (combatMirror) {
+                out.task = TASK_NONE;
+                out.sType = 0; out.sContainer = 0; out.sContainerSerial = 0;
+                out.sIndex = 0; out.sSerial = 0;
+            }
+        }
+        if (!combatMirror && d.combatMirrorSince != 0) {
+            char b[160]; _snprintf(b, sizeof(b) - 1,
+                "[combat] mirror END hand=%u,%u after=%lums why=%s",
+                out.hIndex, out.hSerial, now - d.combatMirrorSince,
+                !coop::taskIsCombat(out.task) ? "peace" : "engage");
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            d.combatMirrorSince = 0;
+        }
+        if (coop::taskIsCombat(out.task) && !combatMirror) {
             // The streamed SUBJECT is the target's hand in the PEER's key space.
             // A body this client minted as a proxy lives under a different local
             // hand (that is what the [rekey] line records), so applyCombat's raw
@@ -1588,7 +1650,10 @@ void Replicator::applyTargets(GameWorld* gw) {
         if (d.combatArmed) {
             float heldDrift = haveActual
                 ? dist3(ax, ay, az, out.x, out.y, out.z) : 0.0f;
-            if ((now - d.combatSeenTick) < COMBAT_DISARM_MS &&
+            // A mirrored body disarms NOW: the hold's live AI is exactly what
+            // let the copy keep fighting a target its owner never reached.
+            if (!combatMirror &&
+                (now - d.combatSeenTick) < COMBAT_DISARM_MS &&
                 heldDrift <= combatBigSnapDist_) {
                 ++d.combatEpHold;
                 { engine::CombatRead hc;
@@ -1625,7 +1690,8 @@ void Replicator::applyTargets(GameWorld* gw) {
                     out.hIndex, out.hSerial, isSquad ? 1 : 0, dur, d.combatEpMaxGap,
                     d.combatEpTicks, d.combatEpFought, d.combatEpHold,
                     d.combatEpHoldFought, d.combatOrders,
-                    heldDrift > combatBigSnapDist_ ? "break" : "timeout");
+                    combatMirror ? "mirror" :
+                    (heldDrift > combatBigSnapDist_ ? "break" : "timeout"));
                 eb[sizeof(eb) - 1] = '\0'; coop::logLine(eb);
                 d.combatEpStart = 0;
             }
@@ -2080,7 +2146,9 @@ void Replicator::applyTargets(GameWorld* gw) {
         // trailed farther). Movers stay driven - the anti-zombie fix - and
         // the release also skips the AI suspend below, so the local AI can
         // idle the body naturally between host movements.
-            if (!isSquad && midTier && !npcMoving) {
+        // A combat-MIRRORED body is never released: its owner says it wants a
+        // fight, and its local AI would start one (stuck-attacker mirror).
+            if (!isSquad && midTier && !npcMoving && !combatMirror) {
                 drivenChars_.erase(c);
                 drivenSeen_.erase(c); // wide pass may census-park it again
                 d.parked = false; d.haveDest = false;

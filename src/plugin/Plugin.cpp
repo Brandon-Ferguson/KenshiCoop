@@ -2786,6 +2786,14 @@ void configureReplicator() {
     // self-healing carried state. KENSHICOOP_CARRY_SYNC=0 is the A/B escape hatch.
     g_repl.setCarrySync(g_cfg.carrySync);
 
+    // Stuck-attacker mirror (hostile-squad desync, default ON): a driven NPC copy
+    // does not chase a target its owner's body is neither near nor moving toward.
+    // KENSHICOOP_COMBAT_STUCK_MIRROR=0 is the A/B escape hatch.
+    g_repl.setCombatStuckMirror(g_cfg.combatStuckMirror);
+    coopLog(g_cfg.combatStuckMirror
+        ? "[combat] stuck-attacker mirror ON"
+        : "[combat] stuck-attacker mirror OFF (every streamed combat intent replayed)");
+
     // Furniture occupancy sync (protocol 19, default ON): reliable bed/cage
     // enter/exit edges + self-healing occupancy state. KENSHICOOP_FURN_SYNC=0
     // is the A/B escape hatch.

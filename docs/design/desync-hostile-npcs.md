@@ -250,6 +250,32 @@ ring stance near the target) is unaffected.
     standing still beyond 60 u (proxy: at most 3 samples) is mirrored for
     that time, which matches what its owner's body is doing.
   - **Off switch:** `KENSHICOOP_COMBAT_STUCK_MIRROR=0`.
+- **Implemented (built, not yet run in game).**
+  - **Where:** `ReplicatorDrive.cpp`, just before the combat branch. The
+    constants are in `ReplicatorUtil.h` (`COMBAT_MIRROR_REACH` 60 u,
+    `COMBAT_MIRROR_MOVE_VEL` 2 u/s, `COMBAT_MIRROR_MOVE_HOLD_MS` 1000).
+  - **Off switch:** `KENSHICOOP_COMBAT_STUCK_MIRROR` (Config, Plugin, then
+    `Replicator::setCombatStuckMirror`). It is on the harness allow-list, so
+    the A/B is `-DiagEnvOverride "KENSHICOOP_COMBAT_STUCK_MIRROR=0"`.
+  - **Scope:** world NPCs only (`!isSquad`) and `TASK_COMBAT_MELEE` only.
+    WAIT stances, ranged copies and unreadable targets keep today's
+    behaviour.
+  - **What a mirrored body does:**
+    - its streamed task is presented to the ordinary drive as `TASK_NONE`
+      (what its owner visibly is), so `applyRest` never sees the synthetic
+      combat task;
+    - an armed copy disarms at once (`clearGoals`, episode `why=mirror`)
+      instead of the 4 s live-AI hold;
+    - it is excluded from the mid-rest release, so it stays AI-suspended
+      rather than going back to its own hostile AI.
+  - **Logs:**
+    `[combat] mirror START hand=… tgt=… reach=… armed=…` and
+    `[combat] mirror END hand=… after=<ms> why=peace|engage`.
+  - **Known limitation:** "ranged" is the copy's *current* ranged combat
+    mode. A host crossbowman standing off far from its target, whose copy has
+    not drawn, is mirrored (held still) rather than shooting. Today that copy
+    is sent a melee order instead, so this is not worse, but it is not right
+    either. A weapon-type check would fix it.
 - **A/B gate:** `mint_aggro` x3 with the gate on and x3 with it off.
   `one_sided_fight` must fail with the gate off and pass with it on.
 - **Regression:**

@@ -166,6 +166,13 @@ const unsigned int  COMBAT_REISSUE_CAP    = 5;    // max timer re-issues per epi
 const unsigned long COMBAT_DISARM_MS      = 4000; // host-stream combat gap before the copy
                                                   // is disarmed (stance samples ride the
                                                   // lossy batch; a gap must not AI-reset)
+// Stuck-attacker mirror (desync-hostile-npcs.md). Replay a streamed melee intent
+// only when the owner's body is within REACH of its target or has moved in the
+// last MOVE_HOLD_MS. Reach probe: real orders median 21-31 u; 60 u is melee
+// plus slack. A stuck owner body reads exactly 0 u/s (enemy 4, 16 s at rest).
+const float         COMBAT_MIRROR_REACH        = 60.0f; // u
+const float         COMBAT_MIRROR_MOVE_VEL     = 2.0f;  // u/s, streamed
+const unsigned long COMBAT_MIRROR_MOVE_HOLD_MS = 1000;  // a pause between steps is not "stuck"
 const unsigned long COMBAT_SNAP_COOL_MS   = 3000; // min gap between hard snaps per body (a
                                                   // snap that can't stick - stagger, stale
                                                   // interp - must not re-fire every frame)

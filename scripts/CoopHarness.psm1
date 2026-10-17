@@ -47,6 +47,9 @@ $script:CoopDiagEnvKeys = @(
     'KENSHICOOP_SQUAD_SYNC'
     'KENSHICOOP_LATEJOIN_SYNC'
     'KENSHICOOP_LOAD_PAUSE_LOCAL'
+    # Stuck-attacker mirror (desync-hostile-npcs.md): "0" restores replaying
+    # every streamed combat intent - the A/B arm for mint_aggro's one_sided_fight.
+    'KENSHICOOP_COMBAT_STUCK_MIRROR'
     # --- log-only diagnostic traces (read outside Config; never gate behavior) ---
     'KENSHICOOP_INV_DUMP'
     'KENSHICOOP_DEBUG_SPEED'

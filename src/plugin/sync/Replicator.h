@@ -153,6 +153,12 @@ public:
     // native on each machine's local pair. KENSHICOOP_CARRY_SYNC=0 disables.
     void setCarrySync(bool v) { carrySync_ = v; }
 
+    // Stuck-attacker mirror (hostile-squad desync, default ON): a driven world-
+    // NPC copy is not ordered after a target its owner's body is neither within
+    // 60 u of nor moving toward (ranged and waiting stances excepted). It holds
+    // where its owner has it, AI-suspended. KENSHICOOP_COMBAT_STUCK_MIRROR=0.
+    void setCombatStuckMirror(bool v) { stuckMirror_ = v; }
+
     // Peer-left sweep (carried-body sync): any driven (peer-owned) copy still
     // carrying a body after its owner disconnected gets a local drop, then the
     // passenger is parked and restoreMovement()'d so Havok is not left dead
@@ -936,6 +942,13 @@ private:
         unsigned int  combatEpFought; //   ...of those, ticks the local copy read engaged
         unsigned int  combatEpHold;   // hold ticks (stream no longer combat, not yet disarmed)
         unsigned int  combatEpHoldFought; // ...of those, ticks the local copy read engaged
+        // Stuck-attacker mirror (KENSHICOOP_COMBAT_STUCK_MIRROR). combatMoveMs is
+        // the last tick the streamed body moved >= 2 u/s while combat was
+        // streamed (held 1 s, so a pause between steps does not flip it);
+        // combatMirrorSince is when the current mirror started (0 = not
+        // mirroring), for the once-per-episode START/END log pair.
+        unsigned long combatMoveMs;
+        unsigned long combatMirrorSince;
         unsigned long combatSnapTick; // last hard snap (cooldown; a failed teleport must not
                                       //   re-fire every frame - walk-converge between snaps)
         unsigned long combatSnapCount;// cumulative combat hard-snaps on this hand (Phase 1 warp
@@ -1050,6 +1063,7 @@ private:
                    combatSeenTick(0),
                    combatEpStart(0), combatEpMaxGap(0), combatEpTicks(0), combatEpFought(0),
                    combatEpHold(0), combatEpHoldFought(0),
+                   combatMoveMs(0), combatMirrorSince(0),
                    combatSnapTick(0), combatSnapCount(0),
                    combatOverTick(0), npcSnapTick(0), hadCarry(false),
                    goalsCleared(false),
@@ -1951,6 +1965,8 @@ private:
     bool                 reportOwnerFilter_;
     std::map<Key, PendingHit> pendingHits_;
     unsigned int         nextHitId_;
+    // Stuck-attacker mirror master enable (KENSHICOOP_COMBAT_STUCK_MIRROR).
+    bool                 stuckMirror_;
 
     // Carried-body sync (protocol 18): master enable (KENSHICOOP_CARRY_SYNC).
     bool                 carrySync_;

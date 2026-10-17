@@ -48,6 +48,7 @@ Replicator::Replicator()
       quietRelapse_(0), crawlPhysRestore_(0),
       sitOrders_(0), detachUses_(0), noDetach_(false),
       dmgGuard_(false), reportCombat_(false), reportOwnerFilter_(true), nextHitId_(1),
+      stuckMirror_(true),
       carrySync_(true), furnSync_(true), chainSync_(true),
       stealthSync_(true), proneSync_(true),
       gateAuthority_(false), trustLogTick_(0),
