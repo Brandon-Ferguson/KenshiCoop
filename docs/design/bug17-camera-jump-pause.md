@@ -1,6 +1,6 @@
 # Bug #17 design: a long camera jump pauses both players
 
-Status: **fix A passes its gate and fails its off arm as designed (October 17, 2026); speed_sync needs a base-build comparison** — October 16-17, 2026.
+Status: **fix A passes its gate and fails its off arm as designed; speed_sync fails identically without the fix (pre-existing)** — October 16-17, 2026.
 Bug source: found during bug #16 (docs/design/bug16-host-black-interior.md);
 docs/PROJECT_BRIEF.md bug table row 17.
 
@@ -190,3 +190,22 @@ Tests:
 | speed_sync | 20261017_081407 | FAIL (pre-existing) | Clicks worked (`REQ mult=3.00` -> `SET mult=3.00`). The oracle's SET pattern expects `combat=N (my=`, but the log has printed `combat=N owner=N (my=` since upstream v0.52 (`ae20e29`); the base branch has the same mismatch, so it counts 0 changes. With `owner=` stripped, one reason is left: the join's same-value 1x click was sent (`REQ mult=1.00 kind=0`, the setter path), but the host had already recorded 1x from the join's routine resend echo, so it logged no new `REQ RECV`. The hold never engaged on either side (`loadPause=0->0` throughout), so none of fix A's code paths were active. Not yet compared on the base build. |
 | speed_probe | 20261017_081638 | PASS | |
 | time_sync | 20261017_081908 | PASS | |
+
+## speed_sync base-build comparison - October 17, 2026
+
+The base build (`fix/host-camera-void`, no fix A; its host log has no
+`[speed] ENGINE togglePause` lines) ran speed_sync as run 20261017_083139:
+
+| | Fix A build (081407) | Base build (083139) |
+|---|---|---|
+| Oracle result | FAIL, 4 reasons | FAIL, the **same 4 reasons** |
+| With `owner=` stripped | 1 reason: same-value 1x click, no host `REQ RECV mult=1.00` | the **same 1 reason** |
+
+So speed_sync's failure is pre-existing and unrelated to fix A. Two follow-ups
+for whoever picks it up (not part of this fix):
+
+1. Update Test-SpeedSync's SET pattern for the `owner=N` field (upstream v0.52).
+2. Look at the same-value vote check. The host logs `REQ RECV` only when the
+   request changes, and the join's routine resend had already reported 1x, so
+   the check waits for a line that never comes. It could be a check problem or a
+   real "stuck vote" regression; it needs its own look.
