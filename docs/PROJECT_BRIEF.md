@@ -112,7 +112,7 @@ fixed it. Reproduce in a real session before claiming a fix.
 |---|-----|--------|----------------|----------|
 | 1 | Joiner's squad names, player faction name, and job queues are wiped on every save cycle. Host-set data survives; joiner-set data doesn't. | #74 | **CONFIRMED.** Nothing replicates squad display names, faction name, or job lists from joiner to host. The host's serialized save lacks them and is pushed back over the joiner's local state. | **High — start here** |
 | 2 | Access-violation crash, frames `KenshiCoop.dll+0x211bf` / `+0x21388`, during save-transfer staging and right after `SCENARIO PROXY` squad creations. Fires repeatedly per evening. Possibly same as nhoral #31 ("crash from faction squad appearing"). | #74 | Those two frames are likely the plugin's own crash handler; the real fault is EXECUTE of an unmapped address (same low offset `...E567` each time → jump into an unloaded module or stale function pointer). Need the dump; the reporter attached `KenshiCoop-crash-evidence.zip` to nhoral/KenshiCoop issue #74. | High |
-| 3 | Fighting side by side: the joiner's character lands ~1 hit in 50. Fighting apart is fine. | #67 | Fork changed combat target translation (v0.1.16) and combat cohesion (v0.46). Unverified. | High |
+| 3 | Fighting side by side: the joiner's character lands ~1 hit in 50. Fighting apart is fine. | #67 | **NOT REPRODUCED** on this build (`fix/coop-melee-hits`, scenario `melee_together`, cell authority on). Side by side (one cell, host authors the NPCs, joiner hits go through the HIT SEND report path) the joiner landed 27.5 and 26.9 hits/min. Apart (own cell, native hits) it landed 20.7 and 20.0/min. Ratio 1.33 / 1.34, nowhere near 1 in 50. Likely fixed by the fork's v0.1.16 target translation. Runs 20261016_213946, 20261016_214243. | Ruled out |
 | 4 | Host crashes instead of disconnecting cleanly when a friend quits or times out. | v0.50 notes | Disconnect paths changed in the fork (`net/NetLink.cpp`). Unverified. | High |
 | 5 | Joiner connects but sees no characters; time of day differs. Tried Steam, UDP, Tailscale, Hamachi, Radmin. | #86 | Unverified. | High if we hit it |
 | 6 | Can't see or heal the other player's characters' health. | #72 | Partial medic animation sync; health readout not replicated. | Medium |
@@ -124,6 +124,7 @@ fixed it. Reproduce in a real session before claiming a fix.
 | 12 | Street props (e.g. Hub sleeping bags) placed differently per player each load. | #72 | Unverified. | Low |
 | 13 | Research bench not using books. | #84 | Unverified. | Low |
 | 14 | No mod-list/version parity check at connect (cost reporters hours of confusion). | #74 | Missing. Cheap win. | Medium |
+| 15 | Double damage: while the host authors the NPCs, the joiner reports every guarded melee hit it sees, including NPC-vs-NPC hits, and the host applies them a second time. | Found during Bug #3 | **CONFIRMED** from logs: combat_kill had 8 applied reports and inv_nested_bag had 62, with no joiner-squad attacks in either. The `hitByMelee_hook` accumulates hits without checking the attacker. | High |
 
 ## How we work
 
