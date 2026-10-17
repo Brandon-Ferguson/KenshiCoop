@@ -325,9 +325,11 @@ function Invoke-Install([string]$kenshi) {
     Show-Message ("KenshiCoop is installed.`r`n`r`n" +
         "1. Start Kenshi from Steam as usual and click OK in the Kenshi launcher window. The main menu " +
         "should say 'RE_Kenshi 0.3.5 - Kenshi 1.0.65' in the bottom-right corner.`r`n" +
-        "2. Load the same save as your friends, then press F2.`r`n" +
-        "3. Host: choose Steam, click 'Copy Steam ID' and send it to your friends.`r`n" +
-        "4. Friends: choose Steam, paste the host's Steam ID and connect.`r`n`r`n" +
+        "2. At the main menu, press F2 and type your name.`r`n" +
+        "3. Host: choose Host and Steam, copy your Steam ID with the button and send it to your " +
+        "friends, then click Create session and load your world.`r`n" +
+        "4. Friends: choose Client and Steam, paste the host's Steam ID and click Connect. You get the " +
+        "host's world - no need to load a save.`r`n`r`n" +
         "Everyone needs this same setup. A backup of your saves is in:`r`n$BackupRoot")
 }
 function Invoke-Uninstall([string]$kenshi) {
