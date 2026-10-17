@@ -311,6 +311,28 @@ ring stance near the target) is unaffected.
      the full lossy-batch bridge.
   3. **Rerun.** `mint_aggro` x3 on and x3 off, plus `combat_crowd` x3, to
      settle the crowd question.
+- **Second cut (built, not yet run in game).**
+  - **Moving.** Horizontal displacement of the streamed pose against an anchor
+    that rolls every 1.5 s (`COMBAT_MIRROR_WINDOW_MS`). Travelling ≥ **15 u**
+    inside one window (`COMBAT_MIRROR_MOVE_DIST`) counts as moving for 1.5 s
+    (`COMBAT_MIRROR_MOVE_HOLD_MS`). It is tracked for every driven NPC, so a
+    body already charging when its intent arrives counts at once.
+  - **Why 15 u and not the 5 u first proposed.** The stuck body in 141424
+    really does lurch in place: the streamed host pose stepped 7 u (14:15:39),
+    5 u (14:15:44) and 10 u (14:15:48, 7.6 u of it horizontal), with its
+    target hundreds of units away. 5 u per second would have let each lurch
+    through, as the velocity test did. 15 u is double the largest
+    horizontal lurch, and about one second of a walking attacker.
+  - **Hold cap.** For NPC copies, behind the same switch, the hold lasts at
+    most max(500 ms, the owner's combat-stream age this episode), up to the
+    old 4 s (`COMBAT_HOLD_MIN_MS`). Episodes that end on the cap log
+    `why=cap`. Player characters keep the full 4 s hold.
+  - **Off switch.** `KENSHICOOP_COMBAT_STUCK_MIRROR=0` turns off the
+    mirror and the cap together.
+  - **Risk to watch.** Real crowd fights had internal gaps up to ~521 ms
+    (p90). An episode younger than that, hit by such a gap, now disarms and
+    re-arms: one extra order. `combat_crowd`'s re-order limit (18) is the
+    check.
 - **A/B gate:** `mint_aggro` x3 with the gate on and x3 with it off.
   `one_sided_fight` must fail with the gate off and pass with it on.
 - **Regression:**

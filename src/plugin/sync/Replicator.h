@@ -942,11 +942,15 @@ private:
         unsigned int  combatEpFought; //   ...of those, ticks the local copy read engaged
         unsigned int  combatEpHold;   // hold ticks (stream no longer combat, not yet disarmed)
         unsigned int  combatEpHoldFought; // ...of those, ticks the local copy read engaged
-        // Stuck-attacker mirror (KENSHICOOP_COMBAT_STUCK_MIRROR). combatMoveMs is
-        // the last tick the streamed body moved >= 2 u/s while combat was
-        // streamed (held 1 s, so a pause between steps does not flip it);
+        // Stuck-attacker mirror (KENSHICOOP_COMBAT_STUCK_MIRROR). The anchor is
+        // the streamed pose at the start of the current displacement window;
+        // combatMoveMs is the last tick the streamed body had travelled
+        // COMBAT_MIRROR_MOVE_DIST from it inside one window (tracked for every
+        // driven NPC, so a body already charging when combat starts counts);
         // combatMirrorSince is when the current mirror started (0 = not
         // mirroring), for the once-per-episode START/END log pair.
+        float         combatAnchorX, combatAnchorZ;
+        unsigned long combatAnchorMs;
         unsigned long combatMoveMs;
         unsigned long combatMirrorSince;
         unsigned long combatSnapTick; // last hard snap (cooldown; a failed teleport must not
@@ -1063,6 +1067,7 @@ private:
                    combatSeenTick(0),
                    combatEpStart(0), combatEpMaxGap(0), combatEpTicks(0), combatEpFought(0),
                    combatEpHold(0), combatEpHoldFought(0),
+                   combatAnchorX(0.0f), combatAnchorZ(0.0f), combatAnchorMs(0),
                    combatMoveMs(0), combatMirrorSince(0),
                    combatSnapTick(0), combatSnapCount(0),
                    combatOverTick(0), npcSnapTick(0), hadCarry(false),

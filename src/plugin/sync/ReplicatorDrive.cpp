@@ -1254,12 +1254,23 @@ void Replicator::applyTargets(GameWorld* gw) {
         // ranged copies (a crossbow legitimately stands off), and a target we
         // cannot read (no evidence - keep today's behaviour).
         bool combatMirror = false;
+        // Displacement of the STREAMED pose, tracked for every driven NPC so a
+        // body already charging when its combat intent arrives counts as
+        // moving. Horizontal only: a lurch on a slope moves y without going
+        // anywhere (141424 enemy 3: +7 u in y on a 7.6 u step).
+        if (stuckMirror_ && !isSquad) {
+            float mdx = out.x - d.combatAnchorX, mdz = out.z - d.combatAnchorZ;
+            bool travelled = d.combatAnchorMs != 0 &&
+                (mdx * mdx + mdz * mdz) >= COMBAT_MIRROR_MOVE_DIST * COMBAT_MIRROR_MOVE_DIST;
+            if (travelled) d.combatMoveMs = now;
+            if (travelled || d.combatAnchorMs == 0 ||
+                (now - d.combatAnchorMs) >= COMBAT_MIRROR_WINDOW_MS) {
+                d.combatAnchorX = out.x; d.combatAnchorZ = out.z;
+                d.combatAnchorMs = now;
+            }
+        }
         if (stuckMirror_ && !isSquad && coop::taskIsCombat(out.task) &&
             !coop::taskIsCombatWait(out.task)) {
-            { EntityState nn; float vx = 0.0f, vy = 0.0f, vz = 0.0f;
-              if (d.interp.latest(&nn, &vx, &vy, &vz) &&
-                  std::sqrt(vx * vx + vy * vy + vz * vz) >= COMBAT_MIRROR_MOVE_VEL)
-                  d.combatMoveMs = now; }
             bool moving = d.combatMoveMs != 0 &&
                           (now - d.combatMoveMs) < COMBAT_MIRROR_MOVE_HOLD_MS;
             float reach = -1.0f;
@@ -1652,8 +1663,19 @@ void Replicator::applyTargets(GameWorld* gw) {
                 ? dist3(ax, ay, az, out.x, out.y, out.z) : 0.0f;
             // A mirrored body disarms NOW: the hold's live AI is exactly what
             // let the copy keep fighting a target its owner never reached.
+            // And the hold is capped by the episode's own age (NPC copies,
+            // same switch): it bridges lossy-batch gaps in a fight the owner
+            // is having, and a 32 ms owner blip is not one - run 141424 bought
+            // 4 s of join-only fighting off exactly that.
+            unsigned long holdMs = COMBAT_DISARM_MS;
+            if (stuckMirror_ && !isSquad && d.combatEpStart != 0) {
+                unsigned long age = (d.combatSeenTick >= d.combatEpStart)
+                    ? d.combatSeenTick - d.combatEpStart : 0;
+                holdMs = age > COMBAT_HOLD_MIN_MS ? age : COMBAT_HOLD_MIN_MS;
+                if (holdMs > COMBAT_DISARM_MS) holdMs = COMBAT_DISARM_MS;
+            }
             if (!combatMirror &&
-                (now - d.combatSeenTick) < COMBAT_DISARM_MS &&
+                (now - d.combatSeenTick) < holdMs &&
                 heldDrift <= combatBigSnapDist_) {
                 ++d.combatEpHold;
                 { engine::CombatRead hc;
@@ -1691,7 +1713,8 @@ void Replicator::applyTargets(GameWorld* gw) {
                     d.combatEpTicks, d.combatEpFought, d.combatEpHold,
                     d.combatEpHoldFought, d.combatOrders,
                     combatMirror ? "mirror" :
-                    (heldDrift > combatBigSnapDist_ ? "break" : "timeout"));
+                    (heldDrift > combatBigSnapDist_ ? "break" :
+                     (holdMs < COMBAT_DISARM_MS ? "cap" : "timeout")));
                 eb[sizeof(eb) - 1] = '\0'; coop::logLine(eb);
                 d.combatEpStart = 0;
             }

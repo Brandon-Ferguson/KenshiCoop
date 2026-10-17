@@ -167,12 +167,21 @@ const unsigned long COMBAT_DISARM_MS      = 4000; // host-stream combat gap befo
                                                   // is disarmed (stance samples ride the
                                                   // lossy batch; a gap must not AI-reset)
 // Stuck-attacker mirror (desync-hostile-npcs.md). Replay a streamed melee intent
-// only when the owner's body is within REACH of its target or has moved in the
-// last MOVE_HOLD_MS. Reach probe: real orders median 21-31 u; 60 u is melee
-// plus slack. A stuck owner body reads exactly 0 u/s (enemy 4, 16 s at rest).
+// only when the owner's body is within REACH of its target or has TRAVELLED
+// MOVE_DIST (horizontal) inside one WINDOW, within the last MOVE_HOLD_MS. Reach
+// probe: real orders median 21-31 u; 60 u is melee plus slack. Displacement,
+// not interp velocity: the first cut keyed on interp.latest() and read 129-744
+// u/s off a stuck body's in-place lurches. Those lurches are real but small -
+// 7.6 u horizontal at most (run 141424, enemy 3) - so the bar sits at 15 u per
+// 1.5 s: double the largest lurch, about one second of a walking attacker.
 const float         COMBAT_MIRROR_REACH        = 60.0f; // u
-const float         COMBAT_MIRROR_MOVE_VEL     = 2.0f;  // u/s, streamed
-const unsigned long COMBAT_MIRROR_MOVE_HOLD_MS = 1000;  // a pause between steps is not "stuck"
+const float         COMBAT_MIRROR_MOVE_DIST    = 15.0f; // u, horizontal, streamed pose
+const unsigned long COMBAT_MIRROR_WINDOW_MS    = 1500;  // displacement window
+const unsigned long COMBAT_MIRROR_MOVE_HOLD_MS = 1500;  // a pause between steps is not "stuck"
+// Combat-hold cap: a copy is held armed (live AI) through a stream gap for at
+// most max(MIN, how long the owner has streamed combat this episode), never
+// past COMBAT_DISARM_MS. Run 141424: a 32 ms host blip bought 4 s of fighting.
+const unsigned long COMBAT_HOLD_MIN_MS         = 500;
 const unsigned long COMBAT_SNAP_COOL_MS   = 3000; // min gap between hard snaps per body (a
                                                   // snap that can't stick - stagger, stale
                                                   // interp - must not re-fire every frame)
