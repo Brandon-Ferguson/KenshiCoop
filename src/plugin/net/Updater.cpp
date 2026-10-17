@@ -475,8 +475,10 @@ DWORD WINAPI threadEntry(LPVOID) {
 // updateRepo / updateEnabled / ...), so a player can point at a fork or turn
 // the whole thing off without a rebuild.
 // Empty owner or repo = updates off, no logging, no network.
-const char* const kDefaultOwner   = "kotetsyy";
-const char* const kDefaultRepo    = "KenshiCoop4up";
+// This fork publishes its own releases: pointing at the 4up repo would replace
+// this build with an incompatible one (different protocol, extra transport DLLs).
+const char* const kDefaultOwner   = "Brandon-Ferguson";
+const char* const kDefaultRepo    = "KenshiCoop";
 const bool        kDefaultEnabled = true;
 
 Settings settingsFromConfig() {
