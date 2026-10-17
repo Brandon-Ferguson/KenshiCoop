@@ -1490,10 +1490,20 @@ unsigned long         g_dmgPassedHits  = 0; // swings passed through to the engi
 // suppressed swing BY a report-attacker (owned player squad) ON a guarded NPC
 // copy accumulates the damage it would have dealt, keyed by the victim copy, for
 // the replicator to forward to the host (which owns the real NPC's health).
+// g_reportAttackers is THIS client's own squad only; g_reportSquad is every
+// player-faction body (own + the peer's copies). A guarded hit ON a squad body is
+// reported whoever swung (the owner only shows a floater); a hit on a world-NPC
+// copy only when one of ours swung - anything else already landed natively on the
+// authoring side, and reporting it would apply it a second time.
+// g_reportOwnerFilter=false (KENSHICOOP_HIT_OWNER_FILTER=0) restores the old
+// report-every-guarded-hit behaviour for the A/B; both sets stay true either
+// way, so the log's dealt=/sq=/rep= show a leaked report (dealt=0 sq=0 rep=1).
 struct ReportedDmg { float flesh; float blood; ReportedDmg() : flesh(0.0f), blood(0.0f) {} };
 std::map<Character*, ReportedDmg> g_reportedDmg;
 std::set<Character*>              g_reportAttackers;
+std::set<Character*>              g_reportSquad;
 bool                              g_combatReport = false;
+bool                              g_reportOwnerFilter = true;
 
 HitMaterialType __fastcall hitByMelee_hook(Character* self, CutDirection dir,
                                            Damages& damage, Character* who,
@@ -1504,8 +1514,12 @@ HitMaterialType __fastcall hitByMelee_hook(Character* self, CutDirection dir,
         g_reportAttackers.find(who) != g_reportAttackers.end();
     bool selfOurs = self && !g_reportAttackers.empty() &&
         g_reportAttackers.find(self) != g_reportAttackers.end();
+    bool selfSquad = self && !g_reportSquad.empty() &&
+        g_reportSquad.find(self) != g_reportSquad.end();
+    bool report = guarded && g_combatReport &&
+        (!g_reportOwnerFilter || whoOurs || selfSquad);
     float tot = damage.total();
-    // Split dealt vs received: join's squad is g_reportAttackers.
+    // Split dealt vs received: our own squad is g_reportAttackers.
     //   guard=1 whoOurs=1  -> join DEALT (victim is a driven/guarded copy)
     //   guard=0 selfOurs=1 -> join RECEIVED (orig will run on our body)
     //   guard=1 selfOurs=1 -> should not happen (we do not guard our own)
@@ -1517,21 +1531,21 @@ HitMaterialType __fastcall hitByMelee_hook(Character* self, CutDirection dir,
         _snprintf(b, sizeof(b) - 1,
                   "[dmg] HIT guard=%d dealt=%d recv=%d total=%.2f "
                   "cut=%.1f blunt=%.1f pierce=%.1f stun=%.1f "
-                  "self='%s' who='%s'",
+                  "self='%s' who='%s' sq=%d rep=%d",
                   guarded ? 1 : 0, (guarded && whoOurs) ? 1 : 0,
                   (!guarded && selfOurs) ? 1 : 0, tot,
                   damage.cut, damage.blunt, damage.pierce, damage.extraStun,
-                  sn, an);
+                  sn, an, selfSquad ? 1 : 0, report ? 1 : 0);
         b[sizeof(b) - 1] = '\0';
         coop::logLine(b);
     }
     if (guarded) {
         ++g_dmgGuardedHits;
-        // Report path (join): the local swing never lands here, but if a player-
-        // squad attacker dealt it, accumulate so the host wounds the real NPC.
+        // Report path: the local swing never lands here, but if one of OUR squad
+        // dealt it (or it hit a squad body), accumulate so the author applies it.
         // flesh ~ solid impact (cut+blunt+pierce+stun); blood ~ bleeding sources
         // (cut+pierce, plus the bleed multiplier). Absolute deltas, host-applied.
-        if (g_combatReport) {
+        if (report) {
             ReportedDmg& rd = g_reportedDmg[self];
             rd.flesh += damage.cut + damage.blunt + damage.pierce + damage.extraStun;
             rd.blood += (damage.cut + damage.pierce) * 0.5f + damage.bleedMult;
@@ -2729,8 +2743,10 @@ void setCombatReport(bool on) {
     g_combatReport = on;
     if (!on) g_reportedDmg.clear();
 }
-void clearReportAttackers()          { g_reportAttackers.clear(); }
+void clearReportAttackers()          { g_reportAttackers.clear(); g_reportSquad.clear(); }
 void addReportAttacker(Character* c)  { if (c) g_reportAttackers.insert(c); }
+void addReportSquadBody(Character* c) { if (c) g_reportSquad.insert(c); }
+void setReportOwnerFilter(bool on)    { g_reportOwnerFilter = on; }
 bool takeReportedDamage(Character* c, float* outFlesh, float* outBlood) {
     std::map<Character*, ReportedDmg>::iterator it = g_reportedDmg.find(c);
     if (it == g_reportedDmg.end()) return false;

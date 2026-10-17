@@ -2050,6 +2050,23 @@
             Tier = 'probe'; WanVariant = $false
         }
 
+        # hit_report_owner: bug #15 gate (double damage). The host's buffed
+        # leader melees the bar NPC nearest the join leader while the join's
+        # squad stands idle in the same cell. Cell authority stays pinned off,
+        # so the host authors every NPC and the join's copies are guarded:
+        # every guarded hit the join sees was the host's or an NPC's and has
+        # already landed on the host. The oracle FAILs on any such hit queued
+        # for the report ([dmg] HIT guard=1 dealt=0 sq=0 rep=1) or on < 5
+        # opportunities. A/B: KENSHICOOP_HIT_OWNER_FILTER=0 must FAIL.
+        hit_report_owner = @{
+            Save = 'sync'; Setup = ''; Tolerance = 20.0
+            Seconds = 150; KillGraceSec = 120
+            PrimaryGate = 'hit_report_owner'
+            Gating   = @('hit_report_owner')
+            Advisory = @('smoothness', 'anim_truth', 'march', 'clock_sync')
+            Tier = 'probe'; WanVariant = $false
+        }
+
         # ---- inventory ---------------------------------------------------------------
         inv_snapshot_cursor = @{
             DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }

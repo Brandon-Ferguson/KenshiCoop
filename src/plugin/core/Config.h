@@ -214,6 +214,12 @@ struct Config {
     // stayed 0). Outcomes stay owner-authoritative (KO/death/revive events).
     // "0" is the escape hatch.
     bool          damageGuard;
+    // Hit-report owner filter (bug #15, DEFAULT ON): a guarded hit on a world-NPC
+    // copy is reported to its author only when THIS client's own squad swung.
+    // Without it every guarded hit was reported - NPC-vs-NPC swings and the
+    // peer's own swings, which had already landed natively on the author - and
+    // the author applied them a second time. "0" restores that for the A/B.
+    bool          hitOwnerFilter;   // KENSHICOOP_HIT_OWNER_FILTER     (on)
 
     // Peer-ready scenario arming (KENSHICOOP_ARM_TIMEOUT_MS). A scenario's clock
     // (onStart + elapsedMs) does not begin at gameplay start; it begins when this

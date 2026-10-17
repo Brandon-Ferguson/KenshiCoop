@@ -2212,10 +2212,16 @@ const float AssaultTravelScenario::TRAVEL_SPEED_MULT = 5.0f;
 //   58-88 s  APART - the join leader attacks again; the host stays away.
 // Lines: SCENARIO MELEE LEADERS / PHASE name=.. state=begin|end / CELLS /
 // PICK / SAMPLE (1 Hz, the join leader's combat read) / PARK / RESULT.
+//
+// hit_report_owner (bug #15 gate, hostOnly): the same TOGETHER phase with only
+// the HOST fighting - the join's squad stands idle in the host's cell, so every
+// guarded hit the join sees was dealt by the host's squad or an NPC and already
+// landed natively on the host. None of them may be reported back ([dmg] HIT
+// guard=1 dealt=0 sq=0 rep=1 is a leak); no MOVE/APART phase.
 class MeleeTogetherScenario : public TimedScenario {
 public:
-    MeleeTogetherScenario()
-        : TimedScenario("melee_together", 0), lastSampleMs_(0), lastPickMs_(0),
+    MeleeTogetherScenario(const char* name = "melee_together", bool hostOnly = false)
+        : TimedScenario(name, 0), hostOnly_(hostOnly), lastSampleMs_(0), lastPickMs_(0),
           haveOwn_(false), havePeer_(false), haveVic_(false), buffed_(false),
           parked_(false), nParked_(0), phase_(PH_SETUP), picksTogether_(0),
           picksApart_(0), leadersLogged_(false) {}
@@ -2230,6 +2236,7 @@ public:
         // ---- Phase edges (both sides log them; the oracle reads the join's) --
         int want = PH_SETUP;
         if (ctx.elapsedMs >= TOGETHER_AT_MS && ctx.elapsedMs < TOGETHER_END_MS) want = PH_TOGETHER;
+        else if (hostOnly_ && ctx.elapsedMs >= TOGETHER_END_MS) want = PH_DONE;
         else if (ctx.elapsedMs >= TOGETHER_END_MS && ctx.elapsedMs < APART_AT_MS) want = PH_MOVE;
         else if (ctx.elapsedMs >= APART_AT_MS && ctx.elapsedMs < APART_END_MS) want = PH_APART;
         else if (ctx.elapsedMs >= APART_END_MS) want = PH_DONE;
@@ -2247,7 +2254,10 @@ public:
         if (ctx.isHost && phase_ == PH_MOVE && !parked_) parkOwnTabFar(ctx);
 
         // ---- Attack orders: join in both phases, host only together ---------
-        bool fighting = (phase_ == PH_TOGETHER) || (phase_ == PH_APART && !ctx.isHost);
+        // (hostOnly: the host alone, together only).
+        bool fighting = hostOnly_
+            ? (phase_ == PH_TOGETHER && ctx.isHost)
+            : ((phase_ == PH_TOGETHER) || (phase_ == PH_APART && !ctx.isHost));
         if (fighting && haveOwn_ && ctx.elapsedMs - lastPickMs_ >= PICK_EVERY_MS) {
             lastPickMs_ = ctx.elapsedMs;
             engine::CombatRead cr;
@@ -2298,9 +2308,14 @@ public:
             }
         }
 
-        unsigned long dur = ctx.isHost ? HOST_DURATION_MS : JOIN_DURATION_MS;
+        unsigned long dur = hostOnly_
+            ? (ctx.isHost ? HOSTONLY_HOST_DURATION_MS : HOSTONLY_JOIN_DURATION_MS)
+            : (ctx.isHost ? HOST_DURATION_MS : JOIN_DURATION_MS);
         if (ctx.elapsedMs >= dur) {
-            passed_ = ctx.isHost
+            if (hostOnly_)
+                passed_ = ctx.isHost ? (buffed_ && picksTogether_ > 0)
+                                     : (buffed_ && haveOwn_ && havePeer_);
+            else passed_ = ctx.isHost
                 ? (buffed_ && parked_ && nParked_ > 0 && picksTogether_ > 0)
                 : (buffed_ && picksTogether_ > 0 && picksApart_ > 0);
             char b[160]; _snprintf(b, sizeof(b) - 1,
@@ -2404,7 +2419,7 @@ private:
         if (!haveOwn_ && io >= 0) { handFromEntity(sq[io], ownHand_); haveOwn_ = true; }
         if (!havePeer_ && ip >= 0) { handFromEntity(sq[ip], peerHand_); havePeer_ = true; }
         // Names, so the oracle can attribute [dmg] HIT who='...' lines to the
-        // join leader (the report-attacker set holds every player character).
+        // join leader (dealt= marks any own-squad swing, not just the leader's).
         if (!leadersLogged_ && haveOwn_ && havePeer_ && io >= 0 && ip >= 0) {
             leadersLogged_ = true;
             char on[48], pn[48];
@@ -2426,10 +2441,13 @@ private:
     static const unsigned long PICK_EVERY_MS    = 5000;
     static const unsigned long JOIN_DURATION_MS = 92000;
     static const unsigned long HOST_DURATION_MS = 96000;
+    static const unsigned long HOSTONLY_JOIN_DURATION_MS = 48000;
+    static const unsigned long HOSTONLY_HOST_DURATION_MS = 50000;
     static const unsigned int  MAX_SQUAD        = 32;
     static const float         PARK_DIST;
     static const float         VICTIM_RADIUS;
 
+    bool          hostOnly_;
     unsigned long lastSampleMs_, lastPickMs_;
     bool          haveOwn_, havePeer_, haveVic_, buffed_, parked_;
     unsigned int  nParked_;
@@ -2461,6 +2479,7 @@ Scenario* makeCombatScenario(const std::string& name) {
     if (name == "combat_win")    return new CombatWinScenario();
     if (name == "pc_assault")   return new PcAssaultScenario();
     if (name == "melee_together") return new MeleeTogetherScenario();
+    if (name == "hit_report_owner") return new MeleeTogetherScenario("hit_report_owner", true);
     return 0;
 }
 

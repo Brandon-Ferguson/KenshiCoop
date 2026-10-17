@@ -2888,6 +2888,10 @@ void installEngineDetours() {
             // Both sides accumulate guarded hits: join→NPC wounds (host applies
             // HP) and hits on a driven peer-squad body (owner shows a floater).
             g_repl.setReportCombat(true);
+            g_repl.setReportOwnerFilter(g_cfg.hitOwnerFilter);
+            coopLog(g_cfg.hitOwnerFilter
+                ? "[dmg] hit report owner filter ON (own-squad swings only on NPC copies)"
+                : "[dmg] hit report owner filter OFF (every guarded hit reported)");
             coopLog(g_cfg.isHost
                 ? "[dmg] hitByMeleeAttack detour installed; damage guard ON + hit report ON (host)"
                 : "[dmg] hitByMeleeAttack detour installed; damage guard ON + combat-hit report ON (join)");

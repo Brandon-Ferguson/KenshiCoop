@@ -348,6 +348,9 @@ public:
 
     // Enable join-dealt damage reporting (join only; see publishCombatHits).
     void setReportCombat(bool v) { reportCombat_ = v; }
+    // Report only our own squad's swings on world-NPC copies (default ON;
+    // KENSHICOOP_HIT_OWNER_FILTER=0 reports every guarded hit, the old A arm).
+    void setReportOwnerFilter(bool v) { reportOwnerFilter_ = v; }
 
     // AFTER publishOwned (protocol 17, both clients): stream each OWNED
     // player-squad member's CharStats (attributes/skills/xp) on the RELIABLE
@@ -1886,6 +1889,7 @@ private:
     // for log correlation.
     struct PendingHit { float flesh; float blood; PendingHit() : flesh(0.0f), blood(0.0f) {} };
     bool                 reportCombat_;
+    bool                 reportOwnerFilter_;
     std::map<Key, PendingHit> pendingHits_;
     unsigned int         nextHitId_;
 

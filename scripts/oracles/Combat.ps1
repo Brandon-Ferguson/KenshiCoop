@@ -1560,3 +1560,63 @@ function Test-MeleeTogether {
                             togetherFightSec = $t.fightSec; apartFightSec = $a.fightSec;
                             hitSend = $t.send; hostApplied = $recvApplied; hostRecv = $recvAll } -Detail $detail)
 }
+
+# hit_report_owner (bug #15 gate): the host's squad fights in the host's cell
+# while the join's squad stands idle, so the join's copies of the enemies are
+# guarded host-driven bodies and every guarded hit the join sees was dealt by the
+# host's squad or an NPC - it already landed natively on the host. A hitByMelee
+# line "[dmg] HIT guard=1 dealt=0 ... sq=0 rep=1" is such a hit queued for the
+# protocol-45 report anyway (the host then applies it a second time): a LEAK.
+# FAIL on any leak on either side, or when the join saw fewer than 5 such hits
+# (no opportunity - the gate proved nothing). dealt=1 (the join's squad defending
+# itself) and sq=1 (a squad victim: the owner's floater path) are legitimate.
+# KENSHICOOP_HIT_OWNER_FILTER=0 reports every guarded hit, so that arm must FAIL.
+function Test-HitReportOwner {
+    param([string]$HostFile, [string]$JoinFile)
+    $why = @()
+    $join = @(Get-Content -Path $JoinFile -ErrorAction SilentlyContinue)
+    $hostLines = @(Get-Content -Path $HostFile -ErrorAction SilentlyContinue)
+
+    # Join window: the TOGETHER phase (the only phase in this scenario).
+    $b = -1; $e = -1
+    for ($i = 0; $i -lt $join.Count; $i++) {
+        if ($b -lt 0 -and $join[$i] -match "SCENARIO MELEE PHASE name=together state=begin who=join") { $b = $i }
+        elseif ($b -ge 0 -and $join[$i] -match "SCENARIO MELEE PHASE name=together state=end who=join") { $e = $i; break }
+    }
+    if ($b -ge 0 -and $e -lt 0) { $e = $join.Count }
+    $win = if ($b -ge 0) { @($join[$b..($e - 1)]) } else { @() }
+    if ($b -lt 0) { $why += "join never began phase 'together'" }
+
+    $cells = $join | Select-String -Pattern "SCENARIO MELEE CELLS phase=together .* same=(\d) dist=(-?\d+)" | Select-Object -First 1
+    $same = if ($null -ne $cells) { [int]$cells.Matches[0].Groups[1].Value } else { -1 }
+    if ($same -ne 1) { $why += "TOGETHER was not in one cell (same=$same) - the join authored its own NPCs, so nothing was guarded" }
+
+    $fmt = @($join + $hostLines | Select-String -Pattern "\[dmg\] HIT guard=\d .* sq=\d rep=\d").Count
+    if ($fmt -eq 0) { $why += "no '[dmg] HIT ... sq= rep=' lines on either side - not a bug #15 build" }
+
+    $opp      = @($win | Select-String -Pattern "\[dmg\] HIT guard=1 dealt=0 .* sq=0 rep=\d").Count
+    $leakJoin = @($win | Select-String -Pattern "\[dmg\] HIT guard=1 dealt=0 .* sq=0 rep=1").Count
+    $leakHost = @($hostLines | Select-String -Pattern "\[dmg\] HIT guard=1 dealt=0 .* sq=0 rep=1").Count
+    $ownJoin  = @($win | Select-String -Pattern "\[dmg\] HIT guard=1 dealt=1 ").Count
+    $sqJoin   = @($win | Select-String -Pattern "\[dmg\] HIT guard=1 .* sq=1 rep=").Count
+    $send     = @($win | Select-String -Pattern "\[combat\] HIT SEND id=").Count
+    $applied  = @($hostLines | Select-String -Pattern "\[combat\] HIT RECV id=\d+ hand=\S+ flesh=\S+ blood=\S+ applied=1").Count
+    $filter   = $join | Select-String -Pattern "\[dmg\] hit report owner filter (ON|OFF)" | Select-Object -First 1
+    $fstate   = if ($null -ne $filter) { $filter.Matches[0].Groups[1].Value } else { '?' }
+
+    if ($opp -lt 5) { $why += "join saw only $opp guarded non-own hits on NPC copies (< 5) - no opportunity to leak" }
+    if ($leakJoin -gt 0) { $why += "join queued $leakJoin of $opp non-own hits on NPC copies for the host (double damage)" }
+    if ($leakHost -gt 0) { $why += "host queued $leakHost non-own hits on NPC copies for the join (double damage)" }
+
+    Write-Host "    FINDING: owner filter $fstate (join); TOGETHER cell same=$same"
+    Write-Host "    FINDING: join guarded hits on NPC copies by others: $opp, reported $leakJoin; by own squad: $ownJoin; on squad bodies: $sqJoin; HIT SEND x$send"
+    Write-Host "    FINDING: host applied $applied join hit reports (HIT RECV applied=1); host leaks $leakHost"
+
+    $v = if ($why.Count -eq 0) { "PASS" } else { "FAIL" }
+    $detail = $why -join "; "
+    Write-Host "  HIT-REPORT-OWNER $v - opportunities=$opp leaks=$($leakJoin + $leakHost) hostApplied=$applied $detail"
+    return (Add-GateResult -Name "hit_report_owner" -Status $v `
+                -Metrics @{ opportunities = $opp; leakJoin = $leakJoin; leakHost = $leakHost;
+                            ownHits = $ownJoin; squadHits = $sqJoin; hitSend = $send;
+                            hostApplied = $applied } -Detail $detail)
+}

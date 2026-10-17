@@ -1331,9 +1331,16 @@ void         spawnDamageFloater(Character* c, float amount);
 // keyed by the copy's Character*. The replicator drains it per driven copy and
 // sends a CombatHitPacket; the host applies it. setCombatReport(false) clears the
 // accumulator. The attacker set is rebuilt each tick (like the guard set).
+// Attackers are THIS client's own squad; squad bodies are every player-faction
+// body. A guarded hit is accumulated when the attacker is ours or the victim is
+// a squad body; setReportOwnerFilter(false) accumulates every guarded hit (A/B)
+// without changing either set.
+// clearReportAttackers clears both sets.
 void         setCombatReport(bool on);
 void         clearReportAttackers();
 void         addReportAttacker(Character* c);
+void         addReportSquadBody(Character* c);
+void         setReportOwnerFilter(bool on);
 // Drain the accumulated join-dealt damage for one victim copy (returns false if
 // nothing pending). flesh/blood are the summed deltas since the last drain.
 bool         takeReportedDamage(Character* c, float* outFlesh, float* outBlood);

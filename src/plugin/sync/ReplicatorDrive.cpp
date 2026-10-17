@@ -249,12 +249,28 @@ void Replicator::applyTargets(GameWorld* gw) {
     // ON a driven copy is captured for publishCombatHits; the set rebuild handles
     // recruit/roster churn. On the host reportCombat_ is false, so the accumulator
     // stays disabled (host swings land natively on the NPCs it owns).
+    // The player faction holds BOTH clients' squads, so the attackers are only
+    // the bodies we own (ownHands_/pinOwned_, refreshed by publishOwned); every
+    // player-faction body is a squad victim (floater path, any attacker).
+    // Reporting a peer's or an NPC's guarded swing double-applied it on the
+    // author (bug #15). reportOwnerFilter_=false reports every guarded hit
+    // again (the A/B arm); the sets are the same either way.
     if (reportCombat_) {
         engine::setCombatReport(true);
+        engine::setReportOwnerFilter(reportOwnerFilter_);
         engine::clearReportAttackers();
         Character* pcs[64];
         unsigned int np = engine::listPlayerChars(gw, pcs, 64);
-        for (unsigned int i = 0; i < np; ++i) engine::addReportAttacker(pcs[i]);
+        for (unsigned int i = 0; i < np; ++i) engine::addReportSquadBody(pcs[i]);
+        const std::set<Key>* own[2] = { &ownHands_, &pinOwned_ };
+        for (int s = 0; s < 2; ++s) {
+            for (std::set<Key>::const_iterator ki = own[s]->begin();
+                 ki != own[s]->end(); ++ki) {
+                Character* oc = engine::resolveCharByHand(
+                    ki->i, ki->s, ki->t, ki->c, ki->cs);
+                if (oc) engine::addReportAttacker(oc);
+            }
+        }
     }
     // Driven-body pointer set rebuilds per tick too: enforceHostAuthority uses it
     // to recognise a streamed body whose LOCAL hand key changed (combat detach
