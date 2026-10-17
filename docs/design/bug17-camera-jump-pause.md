@@ -1,6 +1,6 @@
 # Bug #17 design: a long camera jump pauses both players
 
-Status: **step 1 (speed diagnostics run) in progress** — October 16, 2026.
+Status: **step 1 done: cause confirmed (engine loading pause misread as a pause-button click, then re-applied by the 3 s resend); fix not started** — October 16, 2026.
 Bug source: found during bug #16 (docs/design/bug16-host-black-interior.md);
 docs/PROJECT_BRIEF.md bug table row 17.
 
@@ -87,3 +87,50 @@ never read as "no hits" again.
 The joiner's copy of the host leader staying pinned in a local fight
 (`[drive] freeze why=combat-skip`) after the host leaves. It is a separate
 desync, seen in runs with and without this pause.
+
+## Step 1 result - run 20261016_231422 (speed diagnostics on)
+
+APART again landed no hits (0 in 30 s), and the `[speeddbg]` lines show the
+whole chain on the host. `guard=1` marks the mod's own quiet writes; `guard=0`
+is the engine acting by itself; `i` is the pause argument.
+
+| Time | Line | Meaning |
+|---|---|---|
+| every 3 s before | `userPause i=0 guard=1` + `togglePause i=0 guard=1` | the mod's safety resend writing "running" |
+| 23:16:10.088 | `MELEE PARK ... cam=1` | host squad parked 6000 u away, camera jumps with it |
+| 23:16:10.157 | `togglePause i=1 guard=0` | **Kenshi pauses itself** (69 ms later): the loading pause |
+| 23:16:10.175 | `poll engineDiff=0 btnDiff=1 ... btn=1000 vote=0100` | the togglePause hook explained the engine state, but Kenshi also lit the pause button, and the button detector read that as a click |
+| 23:16:10.175 | `[speed] REQ ... paused=1 kind=1`, `[speed] SET ... paused=1` | committed as a shared pause and sent to the join |
+| 23:16:21.772 and 22.002 | `togglePause i=0 guard=0` | **Kenshi unpauses itself** once loading finishes (~11.6 s) |
+| 23:16:22.206 | `userPause i=1 guard=1` | the mod's 3 s resend **re-applies the pause** |
+| every 3 s to the end | `userPause i=1 guard=1` | the shared pause is held for the rest of the run |
+
+So:
+
+1. **What pauses:** Kenshi's own `togglePause(true)` while it loads the area
+   the camera jumped to. The `togglePause` hook already treats engine state
+   changes as engine-made (`engineDiff=0`). The leak is the **button-highlight
+   detector**: Kenshi highlights the pause button as part of its own pause, and
+   `consumeSpeedIntent` reads a newly highlighted pause button as the player
+   clicking it (`btnDiff=1`, `newIdx == 0` -> `SPEED_INTENT_PAUSE`).
+2. **Why it never ends:** Kenshi does unpause itself after about 11.6 s, but by
+   then the pause is the shared state, and the mod's 3-second resend writes it
+   back. A brief engine pause becomes permanent.
+
+Impact in real play: whenever a long camera jump makes Kenshi load (double-
+clicking a far squad member, following a teleport), both players are left
+paused until someone presses unpause. It is recoverable, not a combat bug.
+
+## Step 2 - fix A, concretely (for approval; no code yet)
+
+When the engine itself calls `togglePause` (the unguarded hook path), note
+that the pause button's highlight now belongs to the engine. Then:
+
+- the button detector ignores the pause button lighting up while that engine
+  pause is in effect (a real click on pause during it changes nothing anyway,
+  since the game is already paused), and
+- once the engine unpauses, the vote highlight is restored as it is today.
+
+Only the input classification changes. A real pause click (button or space bar)
+still goes through the existing paths, which do not depend on this flag. Plus
+the off switch and the checks under "Safety checks for step 2".
