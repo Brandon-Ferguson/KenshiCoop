@@ -2036,12 +2036,17 @@
         # swings ([dmg] HIT ... who=<join leader>) per minute of fighting in each
         # phase and reports the ratio; it gates only that the setup happened.
         # 96 s of scenario after arming, so a longer backstop than the default.
+        # Cell authority ON (the player default; CoopHarness pins it off): with
+        # it off the host authors every NPC wherever the squads stand, so the
+        # APART phase measured the same report path as TOGETHER (runs
+        # 20261016_213013 / 213259: apart native=0).
         melee_together = @{
             Save = 'sync'; Setup = ''; Tolerance = 20.0
             Seconds = 200; KillGraceSec = 170
             PrimaryGate = 'melee_together'
             Gating   = @('melee_together')
             Advisory = @('smoothness', 'anim_truth', 'march', 'clock_sync')
+            DiagEnv = @{ KENSHICOOP_CELL_AUTH = '1' }
             Tier = 'probe'; WanVariant = $false
         }
 

@@ -1531,6 +1531,9 @@ function Test-MeleeTogether {
     foreach ($ph in 'together', 'apart') {
         if ($res[$ph].fightSec -lt 10) { $why += "join leader fought only $($res[$ph].fightSec) s in '$ph' (< 10 s) - too little to measure" }
     }
+    # The baseline must be native: guarded-only APART hits mean the join never
+    # authored its own cell (cell authority off), so the ratio compares like with like.
+    if ($res['apart'].native -eq 0) { $why += "APART had no native hits (guarded $($res['apart'].guarded)) - the join never authored its cell, so there is no native baseline" }
 
     # Host side: how many of the join's reports the host actually applied.
     $recvApplied = @($hostLines | Select-String -Pattern "\[combat\] HIT RECV id=\d+ hand=\S+ flesh=\S+ blood=\S+ applied=1").Count
