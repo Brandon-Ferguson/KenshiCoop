@@ -173,3 +173,16 @@ Not yet tested: a client watching the friend inside a building when that
 friend's character is not selected. Next: the joiner walks its leader into the
 bar with a normal move order (`orderMoveTo`, so it enters the way a player
 would) before the host leaves; plus the step 3 camera refocus in melee_together.
+
+## Step 1b - friend_indoors revised (built, not yet run)
+
+- BASE is now 8-30 s. The joiner latches the bar from its copy of the host's
+  leader, then orders its own leader to walk to the host's leader with
+  `orderMoveTo` (a normal player move order, re-issued every 5 s until its own
+  row says it is inside the bar). OUT moves to 30 s, WATCH to 40-70 s.
+- The oracle checks the joiner is inside during OUT (it walks in during BASE),
+  and FAILs if the host has the joiner's leader selected in WATCH, so selection
+  cannot be what opens the bar.
+- melee_together (step 3): the host's park now also points its camera at its
+  parked leader (`SCENARIO MELEE PARK ... cam=1`), so APART no longer leaves the
+  host camera inside the bar it just left.

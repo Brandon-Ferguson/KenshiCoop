@@ -2387,7 +2387,10 @@ private:
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
 
-    // HOST: move the whole own tab PARK_DIST u along +x, on the terrain.
+    // HOST: move the whole own tab PARK_DIST u along +x, on the terrain, and
+    // point the camera at the parked leader: park() never moves the camera, and
+    // leaving it inside the bar the host just left drew the black void of bug
+    // #16 (friend_indoors run 20261016_223645).
     void parkOwnTabFar(const ScenarioContext& ctx) {
         parked_ = true;
         EntityState sq[MAX_SQUAD];
@@ -2398,15 +2401,20 @@ private:
         float ty = sq[idx].y;
         bool ground = engine::terrainHeightAt(tx, tz, &ty);
         unsigned int k = 0;
+        Character* lead = 0;
         for (unsigned int i = 0; i < n; ++i) {
             if (!tabCtnrEq(sq[i], sq[idx])) continue;
             Character* c = engine::resolve(sq[i]);
-            if (c && engine::park(c, tx + (float)k * 3.0f, ty, tz, 0.0f)) ++nParked_;
+            if (c && engine::park(c, tx + (float)k * 3.0f, ty, tz, 0.0f)) {
+                ++nParked_;
+                if (!lead) lead = c;
+            }
             ++k;
         }
-        char b[160]; _snprintf(b, sizeof(b) - 1,
-            "SCENARIO MELEE PARK members=%u parked=%u at=%.0f,%.0f,%.0f ground=%d",
-            k, nParked_, tx, ty, tz, ground ? 1 : 0);
+        bool cam = lead && engine::cameraFocusOn(ctx.gw, lead);
+        char b[176]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO MELEE PARK members=%u parked=%u at=%.0f,%.0f,%.0f ground=%d cam=%d",
+            k, nParked_, tx, ty, tz, ground ? 1 : 0, cam ? 1 : 0);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
 

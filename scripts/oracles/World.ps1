@@ -2827,10 +2827,11 @@ function Test-CellProbe {
 
 # friend_indoors (bug #16 probe, docs/design/bug16-host-black-interior.md): does a
 # client draw a building's interior open when only the OTHER player's characters
-# are inside it? Probe tier: FAILs only when the setup did not happen (leaders not
-# inside the bar in BASE, both sides latched different buildings, the host still
-# inside in WATCH, the joiner not inside in WATCH, the host camera never followed
-# the joiner); the open/closed rates and the verdict are FINDINGs.
+# are inside it? Probe tier: FAILs only when the setup did not happen (the host's
+# leader not inside in BASE, the joiner's leader not walked inside by OUT, both
+# sides latched different buildings, the host still inside in WATCH, the joiner
+# not inside in WATCH, the host camera never followed the joiner, the host had
+# the joiner selected); the open/closed rates and the verdict are FINDINGs.
 #
 # Lines (both sides, 1 Hz):
 #   SCENARIO INDOOR ROW who=W phase=P lead=own|peer|other ... inside=t.c.cs.i.s res=R ... open=O sel=S
@@ -2879,13 +2880,17 @@ function Test-FriendIndoors {
 
     # ---- Setup checks ----
     $hBase = Get-Share $hOwn 'base' { $_.res -eq 1 }
-    $jBase = Get-Share $jOwn 'base' { $_.res -eq 1 }
     if ($hBase -lt 0.5) { $why += "host leader was inside a building in only $hBase of BASE samples" }
-    if ($jBase -lt 0.5) { $why += "join leader was inside a building in only $jBase of BASE samples" }
     $hBarId = if ($hBar.Count -gt 0) { $hBar[0].bar } else { '' }
     $jBarId = if ($jBar.Count -gt 0) { $jBar[0].bar } else { '' }
     if ($hBarId -eq '' -or $jBarId -eq '') { $why += "a side never latched its building (host='$hBarId' join='$jBarId')" }
     elseif ($hBarId -ne $jBarId) { $why += "host and join latched different buildings (host=$hBarId join=$jBarId)" }
+    # The joiner walks in during BASE, so "inside" is checked over OUT.
+    $jBase = Get-Share $jOwn 'out' { $_.inside -eq $jBarId }
+    $walks = @($join | Select-String -Pattern "SCENARIO INDOOR WALK who=join .* ok=1").Count
+    if ($jBase -lt 0.8) { $why += "join leader was inside the bar in only $jBase of OUT samples (walk orders ok=$walks)" }
+    $hSelPeer = Get-Share $hPeer 'watch' { $_.sel -eq 1 }
+    if ($hSelPeer -gt 0) { $why += "host had the joiner's leader selected in $hSelPeer of WATCH samples - selection could open the bar" }
     $hOut = Get-Share $hOwn 'watch' { $_.outdoors -or $_.inside -ne $hBarId }
     if ($hOut -lt 0.8) { $why += "host leader was out of the bar in only $hOut of WATCH samples - the park did not take it outside" }
     $jIn = Get-Share $jOwn 'watch' { $_.inside -eq $jBarId }
@@ -2907,7 +2912,7 @@ function Test-FriendIndoors {
     # And the join's copy of the host leader once the host left (symmetry check).
     $jCopyIn = Get-Share $jPeer 'watch' { $_.inside -eq $jBarId }
 
-    Write-Host "    FINDING: bar host=$hBarId join=$jBarId; leaders inside in BASE host=$hBase join=$jBase"
+    Write-Host "    FINDING: bar host=$hBarId join=$jBarId; host leader inside in BASE $hBase; join leader inside in OUT $jBase after $walks walk order(s)"
     Write-Host "    FINDING: bar drawn OPEN - host base=$($hOpen['base']) out=$($hOpen['out']) watch=$($hOpen['watch']); join base=$($jOpen['base']) watch=$($jOpen['watch'])"
     Write-Host "    FINDING: WATCH - host leader outside $hOut, join leader inside $jIn; host's copy of the joiner marked inside the bar $copyIn (selected $copySel); join's copy of the host marked inside $jCopyIn"
     $verdict = "inconclusive"
