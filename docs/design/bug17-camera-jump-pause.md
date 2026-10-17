@@ -1,6 +1,6 @@
 # Bug #17 design: a long camera jump pauses both players
 
-Status: **fix A implemented and built (verify passes); not yet run in game** — October 16, 2026.
+Status: **fix A passes its gate and fails its off arm as designed (October 17, 2026); speed_sync needs a base-build comparison** — October 16-17, 2026.
 Bug source: found during bug #16 (docs/design/bug16-host-black-interior.md);
 docs/PROJECT_BRIEF.md bug table row 17.
 
@@ -179,3 +179,14 @@ Tests:
 - Synthetic oracle cases: pass, shared, stuck and no-engine-pause all classify
   correctly.
 - The shipped Release DLL carries the fix; the gate scenario is Harness-only.
+
+## Step 2 results - October 17, 2026 (fix A build)
+
+| Scenario | Run | Result | What it showed |
+|---|---|---|---|
+| camera_jump_pause | 20261017_080626 | **PASS** | Engine pause classified (`camZoneLoaded=0 loadPause=0->1`); host paused 13 of 40 samples then resumed (last 10: 0); join paused 0 of 40; 0 pause votes |
+| camera_jump_pause_off | 20261017_080857 | **FAIL (expected)** | Switch off (`camZoneLoaded=-1`): 1 pause vote; join paused 39 of 40; host still paused at the end. The gate catches the bug. |
+| melee_together | 20261017_081123 | FAIL (test, not fix) | Host loading pause 08:13:09-08:13:23 stayed local; the join was never paused; the join's clock slewed to 0.25 while the host was paused and caught up by ~08:13:32. But the join's leader was **knocked out** at 08:13:12 (`EVT_KNOCKOUT ... bs 0->1`, by the NPC its copy of the host leader was still fighting) in the gap before APART, so it fought 0 s there. A real fight outcome now that the game keeps running. melee_together needs the join leader healthy at APART start. |
+| speed_sync | 20261017_081407 | FAIL (pre-existing) | Clicks worked (`REQ mult=3.00` -> `SET mult=3.00`). The oracle's SET pattern expects `combat=N (my=`, but the log has printed `combat=N owner=N (my=` since upstream v0.52 (`ae20e29`); the base branch has the same mismatch, so it counts 0 changes. With `owner=` stripped, one reason is left: the join's same-value 1x click was sent (`REQ mult=1.00 kind=0`, the setter path), but the host had already recorded 1x from the join's routine resend echo, so it logged no new `REQ RECV`. The hold never engaged on either side (`loadPause=0->0` throughout), so none of fix A's code paths were active. Not yet compared on the base build. |
+| speed_probe | 20261017_081638 | PASS | |
+| time_sync | 20261017_081908 | PASS | |
