@@ -2257,7 +2257,7 @@ public:
                 // Together: the host aims at the enemy nearest the JOIN leader so
                 // the two fight the same enemy, as in the report.
                 const unsigned int* ref = (ctx.isHost && havePeer_) ? peerHand_ : ownHand_;
-                haveVic_ = engine::pickCombatVictim(ctx.gw, ref, 0, vic_, 0);
+                haveVic_ = engine::pickCombatVictim(ctx.gw, ref, 0, vic_, 0, VICTIM_RADIUS);
                 if (haveVic_) {
                     bool ok = engine::orderAttackByHand(ctx.gw, ownHand_, vic_);
                     if (phase_ == PH_TOGETHER) ++picksTogether_; else ++picksApart_;
@@ -2428,6 +2428,7 @@ private:
     static const unsigned long HOST_DURATION_MS = 96000;
     static const unsigned int  MAX_SQUAD        = 32;
     static const float         PARK_DIST;
+    static const float         VICTIM_RADIUS;
 
     unsigned long lastSampleMs_, lastPickMs_;
     bool          haveOwn_, havePeer_, haveVic_, buffed_, parked_;
@@ -2439,6 +2440,9 @@ private:
 };
 // Beyond the 4608 u zone cell and the 2000 u census sphere.
 const float MeleeTogetherScenario::PARK_DIST = 6000.0f;
+// The whole bar: the first run (20261016_204822) found a victim inside the
+// default 30 u only once in 11 picks.
+const float MeleeTogetherScenario::VICTIM_RADIUS = 400.0f;
 
 } // namespace
 

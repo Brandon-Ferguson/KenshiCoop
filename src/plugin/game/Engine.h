@@ -1671,10 +1671,12 @@ bool vetoLocalDeath(Character* c);
 // refHand (excluding, optionally, up to two prior hands - pass 0 for none; the
 // second exclude lets a window drop a DUD striker that never engages without
 // re-picking it, run 033318). Fills outHand (readObjectHand layout). Returns
-// true if one was found.
+// true if one was found. radius: the search sphere around refHand (30 u keeps
+// every existing caller's behaviour; melee_together needs the whole bar).
 bool pickCombatVictim(GameWorld* gw, const unsigned int refHand[5],
                       const unsigned int excludeHand[5], unsigned int outHand[5],
-                      const unsigned int excludeHand2[5] = 0);
+                      const unsigned int excludeHand2[5] = 0,
+                      float radius = 30.0f);
 
 // Order the body at atkHand to focus-melee the body at vicHand (UNPROVOKED, same
 // goal path as startDuel). Both hands readObjectHand layout. Returns true if the
