@@ -198,6 +198,7 @@ function Invoke-OneOracle {
         "assault_mint"  { return (Test-AssaultTravel  -HostFile $HostLog -JoinFile $JoinLog -GateName 'assault_mint' -RequireMint) }
         "mint_aggro"    { return (Test-MintAggro      -HostFile $HostLog -JoinFile $JoinLog) }
         "proxy_drift"   { return (Test-ProxyDrift     -JoinFile $JoinLog) }
+        "one_sided_fight" { return (Test-OneSidedFight -HostFile $HostLog -JoinFile $JoinLog) }
         "pc_assault"    { return (Test-PcAssault       -HostFile $HostLog -JoinFile $JoinLog) }
         "melee_together" { return (Test-MeleeTogether  -HostFile $HostLog -JoinFile $JoinLog) }
         "hit_report_owner" { return (Test-HitReportOwner -HostFile $HostLog -JoinFile $JoinLog) }

@@ -484,16 +484,36 @@ function Test-AssaultTravel {
 # sweep (one line per proxy per second).
 function Test-ProxyDrift {
     param([string]$JoinFile, [double]$MaxDrift = 130.0, [int]$MinSamples = 10,
-          [double]$MaxHostStep = 40.0, [double]$RunawayDrift = 300.0)
+          [double]$MaxHostStep = 40.0, [double]$RunawayDrift = 300.0,
+          [int]$SettleSamples = 2)
     $pat = '\[proxy\] drift hand=(\d+),(\d+) d=([\d\.]+) .*streamed=(\d) fight=(\d) hstep=(-?[\d\.]+)'
+    # settling: within $SettleSamples sweeps after this proxy's first sweep or
+    # after an owner-side jump (hstep > $MaxHostStep). A mint or a scenario
+    # teleport moves the owner's copy in one step, and the 1 Hz census needs a
+    # sweep or two to re-park the proxy onto it - Phase 1 run 125247 has all
+    # three mint_aggro proxies at 448-463 u one sweep after the mint and 0-48 u
+    # the sweep after that. Settling samples are exempt from the RUNAWAY check
+    # only: a proxy still that far out past the window is not settling, and
+    # fighting while displaced is judged on every sample regardless.
+    $settleLeft = @{}
     $all = @(Select-String -Path $JoinFile -Pattern $pat -ErrorAction SilentlyContinue |
               ForEach-Object {
                   $g = $_.Matches[0].Groups
-                  [pscustomobject]@{ hand = "$($g[1].Value),$($g[2].Value)"
+                  $hand = "$($g[1].Value),$($g[2].Value)"
+                  $hstep = [double]$g[6].Value
+                  $settling = $false
+                  if ($hstep -lt 0 -or $hstep -gt $MaxHostStep) {
+                      $settleLeft[$hand] = $SettleSamples
+                  } elseif ($settleLeft.ContainsKey($hand) -and $settleLeft[$hand] -gt 0) {
+                      $settling = $true
+                      $settleLeft[$hand] = $settleLeft[$hand] - 1
+                  }
+                  [pscustomobject]@{ hand = $hand
                                      d = [double]$g[3].Value
                                      streamed = [int]$g[4].Value
                                      fight = [int]$g[5].Value
-                                     hstep = [double]$g[6].Value } })
+                                     hstep = $hstep
+                                     settling = $settling } })
     # Judge only samples where the OWNER's copy was roughly still between
     # sweeps. The census is 1 Hz against a game that runs at 5x, so a sample
     # taken while the owner is sprinting measures that latency, not a
@@ -527,11 +547,12 @@ function Test-ProxyDrift {
     # runs, against 661 u with reconciliation off. What separates the two is not
     # the peak: it is whether the copy is FIGHTING out there, and whether the
     # distance keeps growing instead of being pulled back.
-    $runaway = @($rows | Where-Object { $_.d -gt $RunawayDrift })
+    $runaway = @($rows | Where-Object { $_.d -gt $RunawayDrift -and -not $_.settling })
+    $settled = @($rows | Where-Object { $_.d -gt $RunawayDrift -and $_.settling }).Count
     $worst = ($rows | Sort-Object d -Descending | Select-Object -First 1)
     $m = @{ samples = $rows.Count; lagged = $lagged; maxDrift = $max; medDrift = $med
             over = $over.Count; overFighting = $overFighting.Count
-            runaway = $runaway.Count
+            runaway = $runaway.Count; settlingOverRunaway = $settled
             worstHand = $worst.hand; worstStreamed = $worst.streamed }
     $bad = @()
     if ($overFighting.Count -gt 0) {
@@ -541,8 +562,10 @@ function Test-ProxyDrift {
                  "the fight is happening")
     }
     if ($runaway.Count -gt 0) {
-        $bad += ("proxy $($worst.hand) reached $([int]$max) u from its owner's copy " +
-                 "(runaway limit $RunawayDrift): nothing is pulling it back")
+        $wr = ($runaway | Sort-Object d -Descending | Select-Object -First 1)
+        $bad += ("proxy $($wr.hand) reached $([int]$wr.d) u from its owner's copy " +
+                 "(runaway limit $RunawayDrift, $($runaway.Count) samples past the " +
+                 "$SettleSamples-sweep settle window): nothing is pulling it back")
     }
     if ($bad.Count -gt 0) {
         $d = $bad -join '; '
@@ -551,7 +574,8 @@ function Test-ProxyDrift {
     }
     Write-Host ("  PROXY-DRIFT PASS - no proxy fought while displaced and none ran away " +
                 "(max=$([int]$max), median=$([int]$med), $($over.Count) sample(s) over $MaxDrift u " +
-                "but at peace; samples=$($rows.Count), $lagged excluded as owner-in-motion)")
+                "but at peace; samples=$($rows.Count), $lagged excluded as owner-in-motion, " +
+                "$settled over $RunawayDrift u while settling after a mint or owner jump)")
     return (Add-GateResult -Name 'proxy_drift' -Status PASS -Metrics $m)
 }
 
@@ -609,6 +633,87 @@ function Test-MintAggro {
                 "fight parity $($par.agree)/$($par.pairs) agree " +
                 "(join-only $($par.joinOnly), host-only $($par.hostOnly))")
     return (Add-GateResult -Name 'mint_aggro' -Status PASS -Metrics $m)
+}
+
+# one_sided_fight: what a player actually notices. The fight parity above counts
+# single samples, and a single sample catching one copy mid-swing and the other
+# between swings is a sampling race (mint_aggro's parity swung 0.045-0.354 with
+# no code change). A STREAK is not: the same body fighting on one screen for
+# several consecutive one-second samples while its other copy is at peace is a
+# fight only one player is in - nhoral#34/#54. Phase 1 (2026-10-17) measured
+# 4-5 sample join-only streaks in both cell-authority arms (runs 121900,
+# 125247). Pairing uses Get-EnemyStateParity's nearest-sample rule; a streak
+# breaks on any agreeing sample, any unpaired sample, or a gap over $MaxGapMs.
+function Test-OneSidedFight {
+    param([string]$HostFile, [string]$JoinFile, [int]$MaxStreak = 2,
+          [int]$MinPairs = 8, [int]$TolMs = 1500, [int]$MaxGapMs = 1600)
+    $rx = '\[(\d\d):(\d\d):(\d\d)\.(\d\d\d)\].*SCENARIO TRAVELFIGHT enemystate canon=(\d+,\d+) fight=(\d)'
+    $hostMap = @{}; $joinMap = @{}
+    foreach ($pair in @(@($HostFile, $hostMap), @($JoinFile, $joinMap))) {
+        $file = $pair[0]; $map = $pair[1]
+        $off = Get-LogClockOffsetMs -File $file
+        foreach ($mm in (Select-String -Path $file -Pattern $rx -ErrorAction SilentlyContinue)) {
+            $g = $mm.Matches[0].Groups
+            $key = $g[5].Value
+            if (-not $map.ContainsKey($key)) { $map[$key] = New-Object System.Collections.ArrayList }
+            [void]$map[$key].Add([pscustomobject]@{
+                t = (Convert-StampToMs -Groups $g -OffsetMs $off); fight = [int]$g[6].Value })
+        }
+    }
+    $pairs = 0
+    $worst = @{ join = 0; host = 0 }; $worstHand = @{ join = ''; host = '' }
+    $worstAt = @{ join = 0; host = 0 }
+    foreach ($hand in $joinMap.Keys) {
+        if (-not $hostMap.ContainsKey($hand)) { continue }
+        $hSamples = @($hostMap[$hand] | Sort-Object t)
+        $run = @{ join = 0; host = 0 }; $runStart = @{ join = 0; host = 0 }
+        $prevT = $null
+        foreach ($jr in @($joinMap[$hand] | Sort-Object t)) {
+            $best = $null; $bd = [int]::MaxValue
+            foreach ($hr in $hSamples) {
+                $dd = [Math]::Abs([int]$hr.t - [int]$jr.t)
+                if ($dd -lt $bd) { $bd = $dd; $best = $hr }
+            }
+            $side = ''
+            if ($null -ne $best -and $bd -le $TolMs) {
+                $pairs++
+                if ($jr.fight -ne $best.fight) { $side = if ($jr.fight -eq 1) { 'join' } else { 'host' } }
+            }
+            $gapOk = ($null -eq $prevT) -or (([int]$jr.t - [int]$prevT) -le $MaxGapMs)
+            foreach ($s in @('join', 'host')) {
+                if ($side -eq $s -and $gapOk -and $run[$s] -gt 0) { $run[$s]++ }
+                elseif ($side -eq $s) { $run[$s] = 1; $runStart[$s] = [int]$jr.t }
+                else { $run[$s] = 0 }
+                if ($run[$s] -gt $worst[$s]) {
+                    $worst[$s] = $run[$s]; $worstHand[$s] = $hand; $worstAt[$s] = $runStart[$s]
+                }
+            }
+            $prevT = $jr.t
+        }
+    }
+    $m = @{ pairs = $pairs; maxJoinStreak = $worst.join; maxHostStreak = $worst.host
+            worstJoinHand = $worstHand.join; worstHostHand = $worstHand.host }
+    $bad = @()
+    if ($pairs -lt $MinPairs) {
+        $bad += "only $pairs paired enemy samples (need >= $MinPairs; the two logs never saw the same body)"
+    }
+    foreach ($s in @('join', 'host')) {
+        if ($worst[$s] -gt $MaxStreak) {
+            $other = if ($s -eq 'join') { 'host' } else { 'join' }
+            $ts = [TimeSpan]::FromMilliseconds([Math]::Max(0, $worstAt[$s]))
+            $at = '{0:00}:{1:00}:{2:00}' -f $ts.Hours, $ts.Minutes, $ts.Seconds
+            $bad += ("body $($worstHand[$s]) fought on the $($s.ToUpper()) for $($worst[$s]) consecutive " +
+                     "samples from ~$at while the $other had it at peace (limit $MaxStreak)")
+        }
+    }
+    if ($bad.Count -gt 0) {
+        $d = $bad -join '; '
+        Write-Host "  ONE-SIDED-FIGHT FAIL - $d [pairs=$pairs joinStreak=$($worst.join) hostStreak=$($worst.host)]"
+        return (Add-GateResult -Name 'one_sided_fight' -Status FAIL -Metrics $m -Detail $d)
+    }
+    Write-Host ("  ONE-SIDED-FIGHT PASS - longest one-sided streak join=$($worst.join) host=$($worst.host) " +
+                "samples (limit $MaxStreak, pairs=$pairs)")
+    return (Add-GateResult -Name 'one_sided_fight' -Status PASS -Metrics $m)
 }
 
 # The largest "moved=<u>" the travel series reported in one log (cumulative path
