@@ -276,6 +276,41 @@ ring stance near the target) is unaffected.
     not drawn, is mirrored (held still) rather than shooting. Today that copy
     is sent a melee order instead, so this is not worse, but it is not right
     either. A weapon-type check would fix it.
+- **A/B result, first cut (2026-10-17 14:14-14:36, cell auth on,
+  interleaved): NOT good enough to keep as is.**
+
+  | arm | runs | one_sided_fight | mint_aggro parity |
+  |---|---|---|---|
+  | mirror on  | 141424, 141924, 142426 | FAIL x3 (join streaks 4, 4, 4) | PASS x3 |
+  | mirror off | 141654, 142156, 142700 | FAIL x3 (streaks host 3, join 5, join 4) | FAIL x3 (0.36, 0.54, 0.36) |
+
+  - Parity moved the right way, but the gate the fix was built for did not.
+  - Two holes, both seen in 141424, enemy 3:
+    1. **Bad "moving" reads.** `d.interp.latest()` reported 623, 744 and
+       129 u/s for a body the host had idle. These are interpolation
+       corrections, not locomotion. Each spike passed the 2 u/s test, so the
+       mirror ended (`after=66-135ms why=engage`) and the order went out.
+    2. **The 4 s hold outlives a blip.** At 14:15:42.9 the host streamed
+       combat for 32 ms (`episode dur=32ms`). The copy then fought through
+       the hold: 230 of 238 hold ticks engaged, which is the 4-sample join
+       streak at 14:15:43-46.
+  - **Regressions:**
+    - `combat_battle` and `assault_travel` passed.
+    - `combat_crowd` 142931 FAILED: copy 2,2703369216 was re-ordered 31 times
+      (limit 18), through 19 `hold BREAK` disarm/re-arm cycles at
+      14:31:04-14:31:40. Earlier crowd runs had 1-3 breaks in total per hand
+      and passed.
+    - That body never entered the mirror (no START/END for it). Whether the
+      change caused this is not established from one run.
+- **Proposed second cut (not implemented):**
+  1. **Moving.** Judge it by streamed **displacement** (the owner's pose
+     moved ≥ 5 u in the last ~1 s), not by interp velocity.
+  2. **Cap the hold by the episode's own age.** Hold for at most
+     max(500 ms, the time the owner has streamed combat so far), up to 4 s.
+     A 32 ms blip then buys about 0.5 s, not 4 s, while long fights keep
+     the full lossy-batch bridge.
+  3. **Rerun.** `mint_aggro` x3 on and x3 off, plus `combat_crowd` x3, to
+     settle the crowd question.
 - **A/B gate:** `mint_aggro` x3 with the gate on and x3 with it off.
   `one_sided_fight` must fail with the gate off and pass with it on.
 - **Regression:**
