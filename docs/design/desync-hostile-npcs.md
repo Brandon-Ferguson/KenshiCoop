@@ -166,6 +166,39 @@ ring stance near the target) is unaffected.
     `fought` and `holdFought` high; a real fight, a long `dur`.
   - Episodes that end without a disarm (body culled, ownership flip) log
     nothing.
+- **Episode probe result (runs 20261017_134937 / 135158 / 135417 / 135630,
+  cell auth on): episode length does not separate them either.**
+  - Real fights: `combat_crowd` median about 30 s, `combat_battle` 16-26 s.
+    But real fights also have internal gaps of up to 3.3 s, and host
+    episodes in mint_aggro run 9-21 s.
+  - What does separate them is whether the host's body **moves**. In
+    mint_aggro 135630:
+    - enemies 3 and 5 walked about 250 u off the rise (-50736 to -50959,
+      -50720 to -51039) and fought for real on the host;
+    - enemy 4 never left its park spot (-50705,1629,2651 from 13:57:46 to
+      13:58:02), with its task flickering 65024/65535;
+    - the only PHANTOM episode is enemy 4 (13:57:53: dur 3245 ms, copy
+      engaged 13 streamed ticks and 185 hold ticks).
+  - In 125247 the same: enemy 3 stood at -50737 throughout its join-only
+    fight.
+  - **The phantom is a host attacker that is in combat but stuck.** It holds
+    a target and cannot reach it, while its copy on the join can move and
+    does.
+- **Revised fix (proposal): stuck-attacker mirror.**
+  - While the host streams combat for a body whose streamed position has
+    moved less than a few units over the last ~2 s, and whose target is
+    beyond melee range, the join's copy does not pursue. It converges to
+    the host's pose (the existing soft-band walk) instead of being ordered
+    to attack.
+  - As soon as the host body moves or closes to melee range, the normal
+    replay resumes.
+  - Off switch `KENSHICOOP_COMBAT_STUCK_MIRROR=0`.
+  - Thresholds to be sized offline from the saved runs first: no real fight
+    in `combat_crowd` / `combat_battle` / `assault_travel` may satisfy the
+    stuck rule for more than a moment.
+  - Open question: how much of "stuck" is the scenario's park onto a rise.
+    In real play, NPC pathing failures do happen, and the join's copy, placed
+    from the stream, may not be stuck in the same way.
 - **A/B gate:** `mint_aggro` x3 with the gate on and x3 with it off.
   `one_sided_fight` must fail with the gate off and pass with it on.
 - **Regression:**
