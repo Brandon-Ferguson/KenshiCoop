@@ -209,3 +209,31 @@ for whoever picks it up (not part of this fix):
    request changes, and the join's routine resend had already reported 1x, so
    the check waits for a line that never comes. It could be a check problem or a
    real "stuck vote" regression; it needs its own look.
+
+## Combined regression on merged main (955ff1a) - October 17, 2026
+
+Smoke tier (`regress.ps1 -Tier smoke -SkipBuild`): 15 of 16 PASS. The one
+failure, npc_sync (`rest_flap`, also on its retry), is the known pre-existing
+failure (docs/design/npc-rest-flap.md; it fails on the base build too).
+coop_presence, the other known flaky one, passed.
+
+Bug checks: squad_meta_persist PASS, hit_report_owner PASS, camera_jump_pause
+PASS, friend_indoors PASS.
+
+melee_together (run 20261017_095434) FAIL, a new shape. The host's loading
+pause stayed local (`loadPause=1->0` at 09:56:32), the join was never paused,
+and its clock was back to slew 1.00 within ~6 s. The join's copy of the host
+leader was not pinned this time (0 `combat-skip` freezes). Yet across all
+30 s of APART fighting the join's leader never swung. It sat in the
+attack-slot queue (`wait=1 sword=5` CIRCLE_MENACINGLY x17), pathfinding
+(`sword=11` x7) or deciding (`sword=4` x3), while the Ninja Guard landed 4
+hits on it. Fixes #1 and #15 do not touch local melee AI, and #17 is
+verified working here.
+
+The common thread of the three APART failures since the camera fix (game
+paused before the fix; joiner knocked out; joiner stuck waiting) is that the
+host's camera now leaves the bar with its squad, as in real play. Whether a
+joiner fighting alone after the host walks far away is really impaired is an
+**open question** for its own investigation. It is not a regression from the
+merge: melee_together's APART only became measurable once the pause was
+fixed.
