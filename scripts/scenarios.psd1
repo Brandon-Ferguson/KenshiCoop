@@ -2046,7 +2046,10 @@
             PrimaryGate = 'melee_together'
             Gating   = @('melee_together')
             Advisory = @('smoothness', 'anim_truth', 'march', 'clock_sync')
-            DiagEnv = @{ KENSHICOOP_CELL_AUTH = '1' }
+            # KENSHICOOP_DEBUG_SPEED: bug #17 step 1 - log every engine
+            # pause/speed call ([speeddbg]) to find what pauses both games
+            # when the host camera jumps with its parked squad.
+            DiagEnv = @{ KENSHICOOP_CELL_AUTH = '1'; KENSHICOOP_DEBUG_SPEED = '1' }
             Tier = 'probe'; WanVariant = $false
         }
 
