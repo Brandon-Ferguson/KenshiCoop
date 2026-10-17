@@ -134,6 +134,24 @@ ring stance near the target) is unaffected.
   - `-1`: the target could not be read.
   - It is read-only, and it is a separate line so the parsers keyed on the
     `[combat] order` line are untouched.
+- **Probe result (runs 20261017_132904 / 133127 / 133346 / 133558, cell auth
+  on): a reach gate cannot separate real fights from phantom ones.**
+  - The phantom in mint_aggro 133558: enemy 5 was ordered at `reach=111`
+    with `srcVel=0`. It then fought 4 samples on the join only, from 13:37:14,
+    while the host had it at peace. That run fails `one_sided_fight` again.
+  - Real fights overlap that from both sides:
+    - `combat_crowd`: first orders on still attackers at up to 95 u;
+    - `combat_battle`: orders on still attackers at 470-527 u (13:33:30-33);
+    - `assault_travel`: the host replays the join PC's intent at 897 u.
+  - Any threshold that blocks the 111 u phantom also blocks real fights.
+- **What does separate them:** the host streams `TASK_COMBAT_MELEE` exactly
+  while its own body reads in combat (`EngineEntity.cpp`, the same
+  `inCombat || modeActive` the scenario's `enemystate fight=` samples). In the
+  phantom the host's 1 Hz samples read 0 almost throughout, so the host's
+  combat state is a brief blip. The join turns that blip into a committed
+  attack order. The next measurement is how long host combat episodes last
+  as the join receives them, phantom versus real, to see whether an onset
+  debounce (arm only after N ms of continuous combat stream) splits them.
 - **A/B gate:** `mint_aggro` x3 with the gate on and x3 with it off.
   `one_sided_fight` must fail with the gate off and pass with it on.
 - **Regression:**
