@@ -1,6 +1,6 @@
 // ScenarioCombat.cpp - combat scenarios (monolith split from Scenario.cpp,
 // 2026-07-12): combat_probe, combat_order, combat_kill, player_combat,
-// assault_town, assault_travel, player_ko, combat_crowd. Classes are TU-private (anonymous
+// assault_town, assault_travel, player_ko, combat_crowd, melee_together. Classes are TU-private (anonymous
 // namespace); only makeCombatScenario (ScenarioSupport.h) is exported.
 // Must NOT: change any SCENARIO log string (oracle API, resources/CODE_MAP.md).
 
@@ -2188,6 +2188,258 @@ const float AssaultTravelScenario::CLOSE_DIST  = 12.0f;
 const float AssaultTravelScenario::HOSTILE_REL = -100.0f;
 const float AssaultTravelScenario::TRAVEL_SPEED_MULT = 5.0f;
 
+// melee_together (Bug #3 measurement, nhoral/KenshiCoop #67: "when we fight
+// enemies together, my (the join's) character can only hit maybe one in 50
+// times; fighting apart is indistinguishable from singleplayer"). Probe tier:
+// it MEASURES, the oracle reports; no fix is gated here.
+//
+// Why "together" differs: while both squads stand in one zone cell, cell
+// collapse makes the host author every NPC there, so the join's copy of the
+// enemy is a guarded, host-driven body and a landed join swing becomes a
+// protocol-45 report ([dmg] HIT guard=1 dealt=1 -> [combat] HIT SEND -> host
+// [combat] HIT RECV applied=). Apart, the join authors its own cell and its
+// swings land natively ([dmg] HIT guard=0). The hitByMelee detour logs every
+// landed swing either way with the attacker's name, so the oracle counts the
+// join leader's landed hits per minute of fighting in each phase.
+//
+// Timeline (ctx.elapsedMs from arm), save 'sync' (armed bar crowd):
+//   8 s      both: buff own tab to 120 (same as pc_assault).
+//   14-44 s  TOGETHER - join leader attacks the upright bar NPC nearest it;
+//            the host leader attacks the one nearest the JOIN leader (baked
+//            hands match, so normally the same enemy). Re-picked every 5 s
+//            when the leader has no target.
+//   44 s     host parks its whole own tab PARK_DIST u away (another cell).
+//   58-88 s  APART - the join leader attacks again; the host stays away.
+// Lines: SCENARIO MELEE LEADERS / PHASE name=.. state=begin|end / CELLS /
+// PICK / SAMPLE (1 Hz, the join leader's combat read) / PARK / RESULT.
+class MeleeTogetherScenario : public TimedScenario {
+public:
+    MeleeTogetherScenario()
+        : TimedScenario("melee_together", 0), lastSampleMs_(0), lastPickMs_(0),
+          haveOwn_(false), havePeer_(false), haveVic_(false), buffed_(false),
+          parked_(false), nParked_(0), phase_(PH_SETUP), picksTogether_(0),
+          picksApart_(0), leadersLogged_(false) {}
+
+    virtual void onGameplay(const ScenarioContext& ctx) { latchLeaders(ctx); }
+    virtual void onStart(const ScenarioContext& ctx) { latchLeaders(ctx); }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!haveOwn_ || !havePeer_) latchLeaders(ctx);
+        if (!buffed_ && ctx.elapsedMs >= BUFF_AT_MS) buffOwnTab(ctx);
+
+        // ---- Phase edges (both sides log them; the oracle reads the join's) --
+        int want = PH_SETUP;
+        if (ctx.elapsedMs >= TOGETHER_AT_MS && ctx.elapsedMs < TOGETHER_END_MS) want = PH_TOGETHER;
+        else if (ctx.elapsedMs >= TOGETHER_END_MS && ctx.elapsedMs < APART_AT_MS) want = PH_MOVE;
+        else if (ctx.elapsedMs >= APART_AT_MS && ctx.elapsedMs < APART_END_MS) want = PH_APART;
+        else if (ctx.elapsedMs >= APART_END_MS) want = PH_DONE;
+        if (want != phase_) {
+            if (phase_ == PH_TOGETHER || phase_ == PH_APART) logPhase(ctx, phase_, "end");
+            phase_ = want;
+            haveVic_ = false;
+            if (phase_ == PH_TOGETHER || phase_ == PH_APART) {
+                logPhase(ctx, phase_, "begin");
+                logCells(ctx, phase_);
+            }
+        }
+
+        // ---- Host leaves after TOGETHER, so APART is a different cell --------
+        if (ctx.isHost && phase_ == PH_MOVE && !parked_) parkOwnTabFar(ctx);
+
+        // ---- Attack orders: join in both phases, host only together ---------
+        bool fighting = (phase_ == PH_TOGETHER) || (phase_ == PH_APART && !ctx.isHost);
+        if (fighting && haveOwn_ && ctx.elapsedMs - lastPickMs_ >= PICK_EVERY_MS) {
+            lastPickMs_ = ctx.elapsedMs;
+            engine::CombatRead cr;
+            bool engaged = engine::readCombatByHand(ownHand_, &cr) && cr.hasTarget &&
+                           (cr.inCombat || cr.modeActive);
+            if (!engaged || !haveVic_) {
+                // Together: the host aims at the enemy nearest the JOIN leader so
+                // the two fight the same enemy, as in the report.
+                const unsigned int* ref = (ctx.isHost && havePeer_) ? peerHand_ : ownHand_;
+                haveVic_ = engine::pickCombatVictim(ctx.gw, ref, 0, vic_, 0);
+                if (haveVic_) {
+                    bool ok = engine::orderAttackByHand(ctx.gw, ownHand_, vic_);
+                    if (phase_ == PH_TOGETHER) ++picksTogether_; else ++picksApart_;
+                    char b[176]; _snprintf(b, sizeof(b) - 1,
+                        "SCENARIO MELEE PICK phase=%s who=%s vic=%u,%u ok=%d t=%lu",
+                        phaseName(phase_), ctx.isHost ? "host" : "join",
+                        vic_[3], vic_[4], ok ? 1 : 0, ctx.elapsedMs);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                } else {
+                    char b[128]; _snprintf(b, sizeof(b) - 1,
+                        "SCENARIO MELEE PICK phase=%s who=%s vic=none t=%lu",
+                        phaseName(phase_), ctx.isHost ? "host" : "join", ctx.elapsedMs);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
+            }
+        }
+
+        // ---- 1 Hz: the JOIN leader's combat read, on both sides --------------
+        // (on the host that body is a driven copy - the cohesion view).
+        if ((phase_ == PH_TOGETHER || phase_ == PH_APART) &&
+            ctx.elapsedMs - lastSampleMs_ >= 1000) {
+            lastSampleMs_ = ctx.elapsedMs;
+            const unsigned int* jl = ctx.isHost ? peerHand_ : ownHand_;
+            bool haveJl = ctx.isHost ? havePeer_ : haveOwn_;
+            if (haveJl) {
+                engine::CombatRead cr;
+                bool ok = engine::readCombatByHand(jl, &cr);
+                char b[224]; _snprintf(b, sizeof(b) - 1,
+                    "SCENARIO MELEE SAMPLE phase=%s who=%s fight=%d tgt=%u,%u "
+                    "under=%d wait=%d sword=%d t=%lu", phaseName(phase_),
+                    ctx.isHost ? "host" : "join",
+                    (ok && (cr.inCombat || cr.modeActive)) ? 1 : 0,
+                    (ok && cr.hasTarget) ? cr.target[3] : 0,
+                    (ok && cr.hasTarget) ? cr.target[4] : 0,
+                    (ok && cr.underMelee) ? 1 : 0, (ok && cr.waiting) ? 1 : 0,
+                    ok ? cr.swordState : -1, ctx.elapsedMs);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+
+        unsigned long dur = ctx.isHost ? HOST_DURATION_MS : JOIN_DURATION_MS;
+        if (ctx.elapsedMs >= dur) {
+            passed_ = ctx.isHost
+                ? (buffed_ && parked_ && nParked_ > 0 && picksTogether_ > 0)
+                : (buffed_ && picksTogether_ > 0 && picksApart_ > 0);
+            char b[160]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO MELEE RESULT who=%s buffed=%d parked=%u picks=%u/%u",
+                ctx.isHost ? "host" : "join", buffed_ ? 1 : 0, nParked_,
+                picksTogether_, picksApart_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    enum { PH_SETUP, PH_TOGETHER, PH_MOVE, PH_APART, PH_DONE };
+    static const char* phaseName(int p) {
+        switch (p) {
+            case PH_TOGETHER: return "together";
+            case PH_MOVE:     return "move";
+            case PH_APART:    return "apart";
+            case PH_DONE:     return "done";
+            default:          return "setup";
+        }
+    }
+
+    void logPhase(const ScenarioContext& ctx, int p, const char* state) {
+        char b[128]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO MELEE PHASE name=%s state=%s who=%s t=%lu", phaseName(p), state,
+            ctx.isHost ? "host" : "join", ctx.elapsedMs);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    // Which zone cell each leader stands in: together must be one cell (the
+    // host-authority case), apart must not.
+    void logCells(const ScenarioContext& ctx, int p) {
+        EntityState sq[MAX_SQUAD];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_SQUAD);
+        int i0 = tabLeaderIdx(sq, n, 0), i1 = tabLeaderIdx(sq, n, 1);
+        int h0x = 0, h0z = 0, h1x = 0, h1z = 0;
+        bool ok0 = i0 >= 0 && engine::cellAt(ctx.gw, sq[i0].x, sq[i0].z, &h0x, &h0z);
+        bool ok1 = i1 >= 0 && engine::cellAt(ctx.gw, sq[i1].x, sq[i1].z, &h1x, &h1z);
+        float dist = (i0 >= 0 && i1 >= 0)
+            ? (float)sqrt((sq[i0].x - sq[i1].x) * (sq[i0].x - sq[i1].x) +
+                          (sq[i0].z - sq[i1].z) * (sq[i0].z - sq[i1].z))
+            : -1.0f;
+        char b[200]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO MELEE CELLS phase=%s host=%d,%d join=%d,%d ok=%d same=%d "
+            "dist=%.0f who=%s", phaseName(p), h0x, h0z, h1x, h1z, (ok0 && ok1) ? 1 : 0,
+            (ok0 && ok1 && h0x == h1x && h0z == h1z) ? 1 : 0, dist,
+            ctx.isHost ? "host" : "join");
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    void buffOwnTab(const ScenarioContext& ctx) {
+        buffed_ = true;
+        const unsigned int ownRank = ctx.isHost ? 0u : 1u;
+        EntityState sq[MAX_SQUAD];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_SQUAD);
+        int idx = tabLeaderIdx(sq, n, ownRank);
+        unsigned int nb = 0;
+        if (idx >= 0) {
+            for (unsigned int i = 0; i < n; ++i) {
+                if (!tabCtnrEq(sq[i], sq[idx])) continue;
+                unsigned int h[5]; handFromEntity(sq[i], h);
+                if (engine::raiseAllStats(ctx.gw, h, 120.0f) > 0) ++nb;
+            }
+        }
+        char b[112]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO MELEE BUFF rank=%u buffed=%u", ownRank, nb);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    // HOST: move the whole own tab PARK_DIST u along +x, on the terrain.
+    void parkOwnTabFar(const ScenarioContext& ctx) {
+        parked_ = true;
+        EntityState sq[MAX_SQUAD];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_SQUAD);
+        int idx = tabLeaderIdx(sq, n, 0);
+        if (idx < 0) { coop::logLine("SCENARIO MELEE PARK FAILED (no own leader)"); return; }
+        float tx = sq[idx].x + PARK_DIST, tz = sq[idx].z;
+        float ty = sq[idx].y;
+        bool ground = engine::terrainHeightAt(tx, tz, &ty);
+        unsigned int k = 0;
+        for (unsigned int i = 0; i < n; ++i) {
+            if (!tabCtnrEq(sq[i], sq[idx])) continue;
+            Character* c = engine::resolve(sq[i]);
+            if (c && engine::park(c, tx + (float)k * 3.0f, ty, tz, 0.0f)) ++nParked_;
+            ++k;
+        }
+        char b[160]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO MELEE PARK members=%u parked=%u at=%.0f,%.0f,%.0f ground=%d",
+            k, nParked_, tx, ty, tz, ground ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    void latchLeaders(const ScenarioContext& ctx) {
+        const unsigned int ownRank = ctx.isHost ? 0u : 1u;
+        EntityState sq[MAX_SQUAD];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_SQUAD);
+        int io = tabLeaderIdx(sq, n, ownRank);
+        int ip = tabLeaderIdx(sq, n, ownRank == 0u ? 1u : 0u);
+        if (!haveOwn_ && io >= 0) { handFromEntity(sq[io], ownHand_); haveOwn_ = true; }
+        if (!havePeer_ && ip >= 0) { handFromEntity(sq[ip], peerHand_); havePeer_ = true; }
+        // Names, so the oracle can attribute [dmg] HIT who='...' lines to the
+        // join leader (the report-attacker set holds every player character).
+        if (!leadersLogged_ && haveOwn_ && havePeer_ && io >= 0 && ip >= 0) {
+            leadersLogged_ = true;
+            char on[48], pn[48];
+            engine::charName(engine::resolve(sq[io]), on, sizeof(on));
+            engine::charName(engine::resolve(sq[ip]), pn, sizeof(pn));
+            char b[200]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO MELEE LEADERS who=%s own='%s' own_hand=%u,%u peer='%s' peer_hand=%u,%u",
+                ctx.isHost ? "host" : "join", on, ownHand_[3], ownHand_[4], pn,
+                peerHand_[3], peerHand_[4]);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+
+    static const unsigned long BUFF_AT_MS       = 8000;
+    static const unsigned long TOGETHER_AT_MS   = 14000;
+    static const unsigned long TOGETHER_END_MS  = 44000;
+    static const unsigned long APART_AT_MS      = 58000;
+    static const unsigned long APART_END_MS     = 88000;
+    static const unsigned long PICK_EVERY_MS    = 5000;
+    static const unsigned long JOIN_DURATION_MS = 92000;
+    static const unsigned long HOST_DURATION_MS = 96000;
+    static const unsigned int  MAX_SQUAD        = 32;
+    static const float         PARK_DIST;
+
+    unsigned long lastSampleMs_, lastPickMs_;
+    bool          haveOwn_, havePeer_, haveVic_, buffed_, parked_;
+    unsigned int  nParked_;
+    int           phase_;
+    unsigned int  picksTogether_, picksApart_;
+    bool          leadersLogged_;
+    unsigned int  ownHand_[5], peerHand_[5], vic_[5];
+};
+// Beyond the 4608 u zone cell and the 2000 u census sphere.
+const float MeleeTogetherScenario::PARK_DIST = 6000.0f;
+
 } // namespace
 
 Scenario* makeCombatScenario(const std::string& name) {
@@ -2204,6 +2456,7 @@ Scenario* makeCombatScenario(const std::string& name) {
     if (name == "combat_battle") return new CombatBattleScenario();
     if (name == "combat_win")    return new CombatWinScenario();
     if (name == "pc_assault")   return new PcAssaultScenario();
+    if (name == "melee_together") return new MeleeTogetherScenario();
     return 0;
 }
 

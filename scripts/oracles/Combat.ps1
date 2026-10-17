@@ -1466,3 +1466,94 @@ function Test-PcAssault {
     Write-Host ("  PC-ASSAULT PASS - atk=$atk hit-hand=$hitHand cap=$capAll host-orders=$ordOk hostview-fight=$fight; join-dealt authoritative damage flesh=$($m.hitFlesh)/blood=$($m.hitBlood) (x$hitCount reports) streamed to join drop=$($m.joinDrop) (end-gap $($m.endGap)); cohesion joinOnlyFrac=$joinOnlyFrac (finding)")
     return (Add-GateResult -Name "pc_assault" -Status PASS -Metrics $m)
 }
+
+# melee_together (Bug #3 measurement, nhoral/KenshiCoop #67): how often does the
+# JOIN leader's melee land when both squads fight in one cell (host authority,
+# protocol-45 report path) versus apart (join authority, native hits)? Probe
+# tier: FAILs only when the setup did not happen (phases not in one cell / two
+# cells, too little fighting to measure, leader names not distinguishable); the
+# rates and the verdict are FINDINGs.
+#
+# A landed swing is a hitByMelee detour line "[dmg] HIT guard=G dealt=D recv=0
+# ... who='<join leader>'" between the join log's PHASE begin/end markers. Per
+# minute of FIGHTING = landed / (SAMPLE fight=1 seconds / 60).
+function Test-MeleeTogether {
+    param([string]$HostFile, [string]$JoinFile)
+    $why = @()
+    $join = @(Get-Content -Path $JoinFile -ErrorAction SilentlyContinue)
+    $hostLines = @(Get-Content -Path $HostFile -ErrorAction SilentlyContinue)
+
+    $lead = $join | Select-String -Pattern "SCENARIO MELEE LEADERS who=join own='([^']*)' own_hand=[^ ]+ peer='([^']*)'" | Select-Object -First 1
+    $joinName = ''; $hostName = ''
+    if ($null -eq $lead) { $why += "join never logged MELEE LEADERS (cannot attribute hits)" }
+    else {
+        $joinName = $lead.Matches[0].Groups[1].Value; $hostName = $lead.Matches[0].Groups[2].Value
+        if ($joinName -eq '' -or $joinName -eq $hostName) { $why += "join leader name '$joinName' is empty or equals the host leader's - hits cannot be attributed" }
+    }
+
+    # Line-number window [begin, end) of a phase in a log.
+    function Get-PhaseWindow($lines, [string]$name, [string]$who) {
+        $b = -1; $e = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($b -lt 0 -and $lines[$i] -match "SCENARIO MELEE PHASE name=$name state=begin who=$who") { $b = $i }
+            elseif ($b -ge 0 -and $lines[$i] -match "SCENARIO MELEE PHASE name=$name state=end who=$who") { $e = $i; break }
+        }
+        if ($b -ge 0 -and $e -lt 0) { $e = $lines.Count }
+        return @($b, $e)
+    }
+
+    $res = @{}
+    foreach ($ph in 'together', 'apart') {
+        $w = Get-PhaseWindow $join $ph 'join'
+        $r = @{ landed = 0; guarded = 0; native = 0; fightSec = 0; send = 0; samples = 0; same = -1; dist = -1 }
+        if ($w[0] -lt 0) { $why += "join never began phase '$ph'"; $res[$ph] = $r; continue }
+        for ($i = $w[0]; $i -lt $w[1]; $i++) {
+            $l = $join[$i]
+            if ($joinName -ne '' -and $l -match "\[dmg\] HIT guard=(\d) dealt=(\d) recv=0 .*who='([^']*)'" -and $Matches[3] -eq $joinName) {
+                $r.landed++
+                if ($Matches[1] -eq '1') { $r.guarded++ } else { $r.native++ }
+            }
+            elseif ($l -match "SCENARIO MELEE SAMPLE phase=$ph who=join fight=(\d)") {
+                $r.samples++
+                if ($Matches[1] -eq '1') { $r.fightSec++ }
+            }
+            elseif ($l -match "\[combat\] HIT SEND ") { $r.send++ }
+        }
+        $c = $join | Select-String -Pattern "SCENARIO MELEE CELLS phase=$ph host=\S+ join=\S+ ok=(\d) same=(\d) dist=(-?\d+)" | Select-Object -First 1
+        if ($null -ne $c) { $r.same = [int]$c.Matches[0].Groups[2].Value; $r.dist = [int]$c.Matches[0].Groups[3].Value }
+        $r.rate = if ($r.fightSec -gt 0) { [math]::Round($r.landed / ($r.fightSec / 60.0), 1) } else { 0 }
+        $res[$ph] = $r
+    }
+
+    # Setup checks: together = one cell, apart = two cells, enough fighting.
+    if ($res['together'].same -ne 1) { $why += "TOGETHER was not in one cell (same=$($res['together'].same), dist=$($res['together'].dist)) - not the host-authority case" }
+    if ($res['apart'].same -ne 0) { $why += "APART was not in different cells (same=$($res['apart'].same), dist=$($res['apart'].dist)) - the host squad did not leave" }
+    foreach ($ph in 'together', 'apart') {
+        if ($res[$ph].fightSec -lt 10) { $why += "join leader fought only $($res[$ph].fightSec) s in '$ph' (< 10 s) - too little to measure" }
+    }
+
+    # Host side: how many of the join's reports the host actually applied.
+    $recvApplied = @($hostLines | Select-String -Pattern "\[combat\] HIT RECV id=\d+ hand=\S+ flesh=\S+ blood=\S+ applied=1").Count
+    $recvAll     = @($hostLines | Select-String -Pattern "\[combat\] HIT RECV id=").Count
+    $park = $hostLines | Select-String -Pattern "SCENARIO MELEE PARK members=(\d+) parked=(\d+)" | Select-Object -Last 1
+
+    $t = $res['together']; $a = $res['apart']
+    Write-Host "    FINDING: join leader '$joinName' (host leader '$hostName')"
+    Write-Host "    FINDING: TOGETHER cell same=$($t.same) dist=$($t.dist)u - landed $($t.landed) hits in $($t.fightSec) s fighting = $($t.rate)/min (guarded/reported $($t.guarded), native $($t.native)); HIT SEND x$($t.send)"
+    Write-Host "    FINDING: APART cell same=$($a.same) dist=$($a.dist)u - landed $($a.landed) hits in $($a.fightSec) s fighting = $($a.rate)/min (guarded $($a.guarded), native $($a.native))"
+    Write-Host "    FINDING: host applied $recvApplied of $recvAll join hit reports (HIT RECV applied=1)$(if ($null -ne $park) { "; host parked $($park.Matches[0].Groups[2].Value)/$($park.Matches[0].Groups[1].Value) members" })"
+    $ratio = if ($a.rate -gt 0) { [math]::Round($t.rate / $a.rate, 2) } else { -1 }
+    $verdict = if ($ratio -lt 0) { "no apart baseline - cannot judge" }
+               elseif ($ratio -lt 0.25) { "Bug #3 REPRODUCED - together lands only $ratio x the apart rate" }
+               else { "Bug #3 NOT reproduced - together lands $ratio x the apart rate" }
+    Write-Host "    FINDING: $verdict"
+
+    $v = if ($why.Count -eq 0) { "PASS" } else { "FAIL" }
+    $detail = $why -join "; "
+    Write-Host "  MELEE-TOGETHER $v - together=$($t.rate)/min apart=$($a.rate)/min ratio=$ratio $detail"
+    return (Add-GateResult -Name "melee_together" -Status $v `
+                -Metrics @{ togetherRate = $t.rate; apartRate = $a.rate; ratio = $ratio;
+                            togetherLanded = $t.landed; apartLanded = $a.landed;
+                            togetherFightSec = $t.fightSec; apartFightSec = $a.fightSec;
+                            hitSend = $t.send; hostApplied = $recvApplied; hostRecv = $recvAll } -Detail $detail)
+}

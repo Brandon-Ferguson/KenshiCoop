@@ -2027,6 +2027,24 @@
             Tier = 'full'; WanVariant = $false
         }
 
+        # melee_together: Bug #3 measurement (nhoral/KenshiCoop #67 - "fighting
+        # together, the join hits maybe one in 50 times"). Both buffed tab
+        # leaders melee the bar NPC nearest the join leader in ONE cell (host
+        # authority: the join's landed swings go through the protocol-45 report),
+        # then the host parks its tab 6000 u away and the join fights alone in its
+        # OWN cell (native hits). The oracle counts the join leader's landed
+        # swings ([dmg] HIT ... who=<join leader>) per minute of fighting in each
+        # phase and reports the ratio; it gates only that the setup happened.
+        # 96 s of scenario after arming, so a longer backstop than the default.
+        melee_together = @{
+            Save = 'sync'; Setup = ''; Tolerance = 20.0
+            Seconds = 200; KillGraceSec = 170
+            PrimaryGate = 'melee_together'
+            Gating   = @('melee_together')
+            Advisory = @('smoothness', 'anim_truth', 'march', 'clock_sync')
+            Tier = 'probe'; WanVariant = $false
+        }
+
         # ---- inventory ---------------------------------------------------------------
         inv_snapshot_cursor = @{
             DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }
