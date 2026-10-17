@@ -249,6 +249,32 @@ struct InboundDeed {
     DeedPacket pkt;
 };
 
+// One received squad-tab name (protocol 72, Bug #1): the tab's owner reports
+// its current name; every other client writes it onto its own copy of the tab.
+struct InboundSquadName {
+    u32             ownerId;
+    SquadNamePacket pkt;
+};
+
+// Faction-name sync (protocol 72, Bug #1 step 3): a join's rename event (host
+// side) and the host's authoritative name + acks (join side).
+struct InboundFactionRename {
+    u32                 ownerId;
+    FactionRenamePacket pkt;
+};
+struct InboundFactionName {
+    u32               ownerId;
+    FactionNamePacket pkt;
+};
+
+// One received permanent-job list (protocol 72, Bug #1 step 4): the owner of a
+// character's squad reports its ordered jobs; every other client rebuilds its
+// copy of that character's list.
+struct InboundJobs {
+    u32        ownerId;
+    JobsPacket pkt;
+};
+
 // One received runtime-fixture identity row (protocol 55): a peer names the
 // hand it uses for a fixture and describes where/what it is, so we can pair it
 // with our own copy. Carries no gameplay state - only identity.
@@ -436,7 +462,8 @@ public:
         buildPlace_(worldReset_), buildState_(worldReset_),
         buildDoor_(worldReset_),  buildRemove_(worldReset_), stealth_(worldReset_, 512),
         spawnReq_(worldReset_),   spawnInfo_(worldReset_),  camHint_(worldReset_, 64),
-        cellClaim_(worldReset_, 64) {
+        cellClaim_(worldReset_, 64), squadName_(worldReset_),
+        factionRename_(worldReset_), factionName_(worldReset_), jobs_(worldReset_) {
         InitializeCriticalSection(&cs_);
     }
     ~Inbound() { DeleteCriticalSection(&cs_); }
@@ -611,6 +638,26 @@ public:
         InboundDeed id; id.ownerId = ownerId; id.pkt = pkt;
         EnterCriticalSection(&cs_); deed_.push_back(id); LeaveCriticalSection(&cs_);
     }
+    // NET thread: one received squad-tab name (protocol 72), owner-tagged.
+    void pushSquadName(u32 ownerId, const SquadNamePacket& pkt) {
+        InboundSquadName sn; sn.ownerId = ownerId; sn.pkt = pkt;
+        EnterCriticalSection(&cs_); squadName_.push_back(sn); LeaveCriticalSection(&cs_);
+    }
+    // NET thread: one received faction-rename event (protocol 72, join -> host).
+    void pushFactionRename(u32 ownerId, const FactionRenamePacket& pkt) {
+        InboundFactionRename fr; fr.ownerId = ownerId; fr.pkt = pkt;
+        EnterCriticalSection(&cs_); factionRename_.push_back(fr); LeaveCriticalSection(&cs_);
+    }
+    // NET thread: one received authoritative faction name (protocol 72, host -> all).
+    void pushFactionName(u32 ownerId, const FactionNamePacket& pkt) {
+        InboundFactionName fn; fn.ownerId = ownerId; fn.pkt = pkt;
+        EnterCriticalSection(&cs_); factionName_.push_back(fn); LeaveCriticalSection(&cs_);
+    }
+    // NET thread: one received permanent-job list (protocol 72), owner-tagged.
+    void pushJobs(u32 ownerId, const JobsPacket& pkt) {
+        InboundJobs ij; ij.ownerId = ownerId; ij.pkt = pkt;
+        EnterCriticalSection(&cs_); jobs_.push_back(ij); LeaveCriticalSection(&cs_);
+    }
     // NET thread: one received fixture identity row (protocol 55), owner-tagged.
     void pushFixture(u32 ownerId, const FixturePacket& pkt) {
         InboundFixture ifx; ifx.ownerId = ownerId; ifx.pkt = pkt;
@@ -778,6 +825,18 @@ public:
     void drainDeed(std::deque<InboundDeed>& out) {
         EnterCriticalSection(&cs_); out.swap(deed_); LeaveCriticalSection(&cs_);
     }
+    void drainSquadName(std::deque<InboundSquadName>& out) {
+        EnterCriticalSection(&cs_); out.swap(squadName_); LeaveCriticalSection(&cs_);
+    }
+    void drainFactionRename(std::deque<InboundFactionRename>& out) {
+        EnterCriticalSection(&cs_); out.swap(factionRename_); LeaveCriticalSection(&cs_);
+    }
+    void drainFactionName(std::deque<InboundFactionName>& out) {
+        EnterCriticalSection(&cs_); out.swap(factionName_); LeaveCriticalSection(&cs_);
+    }
+    void drainJobs(std::deque<InboundJobs>& out) {
+        EnterCriticalSection(&cs_); out.swap(jobs_); LeaveCriticalSection(&cs_);
+    }
     void drainFixture(std::deque<InboundFixture>& out) {
         EnterCriticalSection(&cs_); out.swap(fixture_); LeaveCriticalSection(&cs_);
     }
@@ -913,6 +972,10 @@ private:
     WorldQ<InboundSpawnInfo>       spawnInfo_;
     WorldQ<InboundCamHint>         camHint_;
     WorldQ<InboundCellClaim>       cellClaim_;
+    WorldQ<InboundSquadName>       squadName_;
+    WorldQ<InboundFactionRename>   factionRename_;
+    WorldQ<InboundFactionName>     factionName_;
+    WorldQ<InboundJobs>            jobs_;
 
     // SESSION-PRESERVING: coordinated save (protocol 31) + load (protocol 32)
     // handshake - a GO/NACK/chunk arriving mid-swap must survive the reset.

@@ -92,6 +92,11 @@ Replicator::Replicator()
       prodSeqOut_(1), prodSampleMs_(0), prodSync_(true),
       researchSeqOut_(1), researchSampleMs_(0), researchSync_(true),
       deedSeqOut_(1), deedSampleMs_(0), deedAuditMs_(0), deedSync_(true),
+      squadNameSeqOut_(1), squadNameSampleMs_(0), squadMetaSync_(true),
+      facNameSeeded_(false), facNameSampleMs_(0), facRenameSeq_(0),
+      facRenamePending_(0), facNameSeqSeen_(0), facNameSentMs_(0),
+      facNameSeqOut_(1), facNameDirty_(false),
+      jobsSeqOut_(1), jobsSampleMs_(0),
       fixtureSeqOut_(1), fixtureSampleMs_(0), fixtureSync_(true),
       storeSync_(false), contCensusMs_(0),
       timeSync_(true), timeBrake_(true),
@@ -101,6 +106,7 @@ Replicator::Replicator()
       platoonT0_(0),
       lifeSweepMs_(0) {
     peerCam_[0] = peerCam_[1] = peerCam_[2] = 0.0f;
+    memset(facNameAck_, 0, sizeof(facNameAck_));
     memset(peerNick_, 0, sizeof(peerNick_));
     memset(peerReadyLoadIds_, 0, sizeof(peerReadyLoadIds_));
     memset(nickHandSet_, 0, sizeof(nickHandSet_));
@@ -257,6 +263,21 @@ void Replicator::resetSession() {
     prodRows_.clear();
     researchRows_.clear(); // protocol 38: re-baselined from the new world's store
     deedRows_.clear();     // protocol 54: re-baselined from the new world's owned set
+    squadNameOut_.clear(); // protocol 72: every owned tab name re-sent from the new world
+    squadNameIn_.clear();
+    // Protocol 72 faction name: re-seed from the new world's name. The join's
+    // rename seq stays monotonic; the host's acks restart (it accepts any).
+    facNameSeen_.clear();
+    facNameSeeded_    = false;
+    facRenamePending_ = 0;
+    facNameSeqSeen_   = 0;
+    facNameTotal_.clear();
+    facNameSent_.clear();
+    facNameSentMs_    = 0;
+    facNameDirty_     = false;
+    memset(facNameAck_, 0, sizeof(facNameAck_));
+    jobsOut_.clear(); // protocol 72: every owned list re-sent from the new world
+    jobsIn_.clear();
     facRows_.clear();
     invPub_.clear();
     invRecv_.clear();
@@ -360,6 +381,9 @@ void Replicator::resetSession() {
     researchSampleMs_ = 0;
     deedSampleMs_ = 0;
     deedAuditMs_ = 0;
+    squadNameSampleMs_ = 0;
+    facNameSampleMs_ = 0;
+    jobsSampleMs_ = 0;
     // A coordinated load re-instantiates every runtime fixture, so both halves
     // of the protocol-55 pairing are stale: re-announce and re-match from
     // scratch rather than translate a hand into a destroyed object.

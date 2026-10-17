@@ -1511,6 +1511,55 @@
             Tier = 'full'; WanVariant = $false
         }
 
+        # squad_meta_probe: Bug #1 step 1 (docs/design/bug1-squad-meta.md). No
+        # channel yet - each side renames its own squad tab, the join renames the
+        # faction and both append JOB_MEDIC through OrdersReceiver::addJob; the
+        # host also appends one to the join's puppet and samples it, renames the
+        # faction itself, then coordinated-saves and loads. The oracle gates only
+        # that every step ran and prints the answers to the four design questions
+        # (tab identity, setName persistence, permajob add/order, puppet safety)
+        # as FINDING lines. clock_sync is not gated (the load restarts it).
+        squad_meta_probe = @{
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'squad_meta_probe'
+            Gating   = @('squad_meta_probe')
+            Advisory = @('smoothness', 'anim_truth', 'march', 'clock_sync')
+            Tier = 'probe'; WanVariant = $false
+        }
+
+        # squad_meta_probe2: Bug #1 step 1b, same flow as squad_meta_probe. The
+        # host writes different names to Faction::name and
+        # PlayerInterface::factionName before the save (step 1 showed setName
+        # alone does not persist); both sides append three different job
+        # types with no subject and clear + re-add them. The oracle gates only that
+        # the steps ran and prints which faction field survived and the job
+        # order before/after the round trip and the reload.
+        squad_meta_probe2 = @{
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'squad_meta_probe2'
+            Gating   = @('squad_meta_probe2')
+            Advisory = @('smoothness', 'anim_truth', 'march', 'clock_sync')
+            Tier = 'probe'; WanVariant = $false
+        }
+
+        # squad_meta_persist: the regression gate for Bug #1 (protocol 72) -
+        # squad names, the faction name and permanent jobs. The JOIN renames
+        # its own squad tab and the player faction and gives its tab leader two
+        # jobs; the host latches what it sees for each (recording whether each
+        # change arrived), then coordinated-saves and loads mid-session. Gates
+        # that BOTH clients read the join's values back after the reload - the
+        # faction in both the displayed and the saved field, the jobs in order;
+        # coming back with the old values IS the bug, which
+        # KENSHICOOP_SQUAD_META=0 reproduces. clock_sync is not gated (the load
+        # restarts the clock series), as for money_persist.
+        squad_meta_persist = @{
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'squad_meta_persist'
+            Gating   = @('squad_meta_persist')
+            Advisory = @('smoothness', 'anim_truth', 'march', 'clock_sync')
+            Tier = 'full'; WanVariant = $false
+        }
+
         # bootstrap_stream: the missing-save "seamless join" proof (protocol
         # 31/32). NOT a run_test tier member and NOT run_test-drivable - it needs
         # the join-from-MENU launch (join has NO save, goes ONLINE, host bakes +

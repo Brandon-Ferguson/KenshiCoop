@@ -817,3 +817,288 @@ function Test-MoneyPersist {
                 -Metrics @{ expect = $expect; hostPost = $hostPost; joinPost = $joinPost } -Detail $detail)
 }
 
+# squad_meta_probe (Bug #1 step 1, probe tier): did the probe run every step, and
+# what did it find? FAILs only on a missing mechanical step (writes, save, ACK,
+# load, swap, post-load census). The four design questions are answered as
+# FINDING lines, not gated - see docs/design/bug1-squad-meta.md.
+function Test-SquadMetaProbe {
+    param([string]$HostFile, [string]$JoinFile)
+    $why = @()
+    $tabRe = "SCENARIO SMTAB phase=(\w+) rank=(\d+) ctnr=(\d+,\d+) leader=(\d+,\d+) name='([^']*)' ok=(\d)"
+    $facRe = "SCENARIO SMFACTION phase=(\w+) name='([^']*)' ok=(\d)"
+
+    # Mechanism: each side's own squad-name write, the join's faction write.
+    foreach ($side in @(@($HostFile, 'host'), @($JoinFile, 'join'))) {
+        $w = Select-String -Path $side[0] -Pattern "SCENARIO SMWRITE kind=squad .*ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $w) { $why += "$($side[1]) never wrote its own squad name (no SMWRITE kind=squad)" }
+        elseif ($w.Matches[0].Groups[1].Value -ne '1') { $why += "$($side[1]) squad-name write did not read back" }
+    }
+    $jf = Select-String -Path $JoinFile -Pattern "SCENARIO SMWRITE kind=faction .*ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($null -eq $jf -or $jf.Matches[0].Groups[1].Value -ne '1') { $why += "join faction write missing or did not read back" }
+    foreach ($leg in @(@('SMSAVE', 'coordinated save'), @('SMACK', 'join save-commit ACK'), @('SMLOAD', 'mid-session load'))) {
+        $m = Select-String -Path $HostFile -Pattern "SCENARIO $($leg[0]) .*ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $m) { $why += "host never logged its $($leg[1]) ($($leg[0]))" }
+        elseif ($m.Matches[0].Groups[1].Value -ne '1') { $why += "host $($leg[1]) failed" }
+    }
+    $tabs = @{}; $facs = @{}
+    foreach ($side in @(@($HostFile, 'host'), @($JoinFile, 'join'))) {
+        $tag = $side[1]
+        if ($null -eq (Select-String -Path $side[0] -Pattern 'SCENARIO SMSWAPDONE' -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            $why += "$tag never completed its world swap (no SMSWAPDONE)"
+        }
+        foreach ($m in @(Select-String -Path $side[0] -Pattern $tabRe -ErrorAction SilentlyContinue)) {
+            $g = $m.Matches[0].Groups
+            $tabs["$tag|$($g[1].Value)|$($g[2].Value)"] = @{ Ctnr = $g[3].Value; Name = $g[5].Value }
+        }
+        foreach ($m in @(Select-String -Path $side[0] -Pattern $facRe -ErrorAction SilentlyContinue)) {
+            $g = $m.Matches[0].Groups
+            $facs["$tag|$($g[1].Value)"] = $g[2].Value
+        }
+        if (-not $tabs.ContainsKey("$tag|post|0")) { $why += "$tag never logged its post-load census (SMTAB phase=post)" }
+    }
+
+    # Q1: the same squad tab has the same container identity on both sides.
+    foreach ($rank in 0, 1) {
+        $h = $tabs["host|pre|$rank"]; $j = $tabs["join|pre|$rank"]
+        if ($null -ne $h -and $null -ne $j) {
+            $same = if ($h.Ctnr -eq $j.Ctnr) { "SAME" } else { "DIFFERENT" }
+            Write-Host "    FINDING Q1: tab $rank container host=$($h.Ctnr) join=$($j.Ctnr) ($same)"
+        } else {
+            Write-Host "    FINDING Q1: tab $rank missing on $(if ($null -eq $h) { 'host' } else { 'join' }) (single-tab save?)"
+        }
+    }
+    # Q2: do the host's own setName writes survive its save?
+    $hp = $tabs["host|post|0"]
+    if ($null -ne $hp) { Write-Host "    FINDING Q2: host tab 0 after reload = '$($hp.Name)' (wrote 'SMProbe Host Squad')" }
+    Write-Host "    FINDING Q2: faction after reload host='$($facs['host|post'])' join='$($facs['join|post'])' (host wrote 'SMProbe Host Faction')"
+    # Q3: does addJob append, and does clear + re-add preserve order?
+    foreach ($side in @(@($HostFile, 'host'), @($JoinFile, 'join'))) {
+        $a = Select-String -Path $side[0] -Pattern "SCENARIO SMWRITE kind=jobadd target=own .*before=(-?\d+) after=(-?\d+) last=(-?\d+) call=(\d) ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -ne $a) {
+            $g = $a.Matches[0].Groups
+            Write-Host "    FINDING Q3: $($side[1]) addJob JOB_MEDIC on own leader: count $($g[1].Value) -> $($g[2].Value), last=$($g[3].Value), appended=$($g[5].Value)"
+        }
+    }
+    $r = Select-String -Path $JoinFile -Pattern "SCENARIO SMJOBROUND .*" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($null -ne $r) { Write-Host "    FINDING Q3: join clear + re-add round trip: $($r.Line -replace '^.*SCENARIO SMJOBROUND ', '')" }
+    # Q4: does a permajob wake an AI-suppressed puppet on the host?
+    $pa = Select-String -Path $HostFile -Pattern "SCENARIO SMWRITE kind=jobadd target=puppet .*" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($null -ne $pa) { Write-Host "    FINDING Q4: host addJob on join puppet: $($pa.Line -replace '^.*kind=jobadd target=puppet ', '')" }
+    $tasks = @(Select-String -Path $HostFile -Pattern "SCENARIO SMPUPPET i=\d+ task=(-?\d+) jobs=(-?\d+)" -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Matches[0].Groups[1].Value)/$($_.Matches[0].Groups[2].Value)" })
+    if ($tasks.Count -gt 0) { Write-Host "    FINDING Q4: puppet task/jobs at 1 Hz: $($tasks -join ' ')" }
+    # The Bug #1 symptom itself: the join's own values, seen by the host and after reload.
+    $hm = $tabs["host|mid|1"]; $jpost = $tabs["join|post|1"]
+    if ($null -ne $hm) { Write-Host "    FINDING bug: host saw join tab 1 as '$($hm.Name)' before saving (join wrote 'SMProbe Join Squad')" }
+    if ($null -ne $jpost) { Write-Host "    FINDING bug: join tab 1 after reload = '$($jpost.Name)'" }
+
+    $v = if ($why.Count -eq 0) { "PASS" } else { "FAIL" }
+    $detail = $why -join "; "
+    Write-Host "  SQUAD-META-PROBE $v - $detail"
+    return (Add-GateResult -Name "squad_meta_probe" -Status $v -Detail $detail)
+}
+
+# squad_meta_probe2 (Bug #1 step 1b, probe tier): which faction-name field does
+# the save keep, and does clear + re-add preserve the order of 2+ jobs? FAILs
+# only when a step needed to answer that did not run (fewer than two jobs
+# appended, no round trip, a faction write, save/ACK/load/swap, post census).
+function Test-SquadMetaProbe2 {
+    param([string]$HostFile, [string]$JoinFile)
+    $why = @()
+    $fieldRe = "SCENARIO SMFACFIELDS phase=(\w+) member='([^']*)' iface='([^']*)' data='([^']*)' ok=(\d)"
+    $jobsRe  = "SCENARIO SMJOBS phase=(\w+) rank=(\d+) n=(-?\d+) jobs=\[([^\]]*)\]"
+
+    foreach ($side in @(@($HostFile, 'host'), @($JoinFile, 'join'))) {
+        $file = $side[0]; $tag = $side[1]
+        $adds = @(Select-String -Path $file -Pattern "SCENARIO SMWRITE kind=jobadd target=own type=(\d+) .* ok=(\d)" -ErrorAction SilentlyContinue)
+        $okAdds = @($adds | Where-Object { $_.Matches[0].Groups[2].Value -eq '1' }).Count
+        Write-Host "    FINDING jobs: $tag appended $okAdds of $($adds.Count) job types ($(($adds | ForEach-Object { "$($_.Matches[0].Groups[1].Value)=$($_.Matches[0].Groups[2].Value)" }) -join ' '))"
+        if ($okAdds -lt 2) { $why += "$tag appended only $okAdds jobs - order is untestable" }
+        $r = Select-String -Path $file -Pattern "SCENARIO SMJOBROUND .*" -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $r) { $why += "$tag never logged its SMJOBROUND" }
+        elseif ($r.Line -match 'skipped=1') { $why += "$tag skipped the round trip ($($r.Line -replace '^.*SMJOBROUND ', ''))" }
+        else { Write-Host "    FINDING order: $tag clear + re-add: $($r.Line -replace '^.*SCENARIO SMJOBROUND ', '')" }
+        if ($null -eq (Select-String -Path $file -Pattern 'SCENARIO SMSWAPDONE' -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            $why += "$tag never completed its world swap (no SMSWAPDONE)"
+        }
+        $post = Select-String -Path $file -Pattern ($fieldRe -replace '\(\\w\+\)', 'post') -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $post) { $why += "$tag never logged its post-load SMFACFIELDS" }
+        else {
+            $g = $post.Matches[0].Groups
+            Write-Host "    FINDING faction: $tag after reload member='$($g[1].Value)' iface='$($g[2].Value)' data='$($g[3].Value)'"
+        }
+        # Order after reload, on the side's own tab (host rank 0 / join rank 1).
+        $own = if ($tag -eq 'host') { '0' } else { '1' }
+        $seq = @{}
+        foreach ($m in @(Select-String -Path $file -Pattern $jobsRe -ErrorAction SilentlyContinue)) {
+            $g = $m.Matches[0].Groups
+            if ($g[2].Value -eq $own) { $seq[$g[1].Value] = (($g[4].Value -split ';') | ForEach-Object { ($_ -split '@')[0] }) -join ',' }
+        }
+        Write-Host "    FINDING order: $tag own tab job types mid=[$($seq['mid'])] post=[$($seq['post'])]"
+    }
+    foreach ($w in @(@('faction', 'Faction::setName write'), @('ifacefaction', 'PlayerInterface::factionName write'))) {
+        $m = Select-String -Path $HostFile -Pattern "SCENARIO SMWRITE kind=$($w[0]) .*ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $m -or $m.Matches[0].Groups[1].Value -ne '1') { $why += "host $($w[1]) missing or failed" }
+    }
+    foreach ($leg in @(@('SMSAVE', 'coordinated save'), @('SMACK', 'join save-commit ACK'), @('SMLOAD', 'mid-session load'))) {
+        $m = Select-String -Path $HostFile -Pattern "SCENARIO $($leg[0]) .*ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $m) { $why += "host never logged its $($leg[1]) ($($leg[0]))" }
+        elseif ($m.Matches[0].Groups[1].Value -ne '1') { $why += "host $($leg[1]) failed" }
+    }
+    # Which faction field survived the host's save?
+    $hp = Select-String -Path $HostFile -Pattern ($fieldRe -replace '\(\\w\+\)', 'post') -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($null -ne $hp) {
+        $member = $hp.Matches[0].Groups[1].Value
+        $answer = switch ($member) {
+            'P2 Iface Name'  { "PlayerInterface::factionName is what the save keeps (the load copies it into Faction::name)" }
+            'P2 Member Name' { "Faction::name itself survived this time (contradicts step 1)" }
+            default          { "neither written field survived - the saved name lives somewhere else" }
+        }
+        Write-Host "    FINDING faction: $answer"
+    }
+
+    $v = if ($why.Count -eq 0) { "PASS" } else { "FAIL" }
+    $detail = $why -join "; "
+    Write-Host "  SQUAD-META-PROBE2 $v - $detail"
+    return (Add-GateResult -Name "squad_meta_probe2" -Status $v -Detail $detail)
+}
+
+# squad_meta_persist (protocol 72, Bug #1 step 2): does a squad name the JOIN
+# set survive the save? The host's save was the only one that lasted, so the
+# join's tab names were wiped on every load. The join renames its tab, the host
+# latches what reached it, saves and loads; the gate is that BOTH clients read
+# the join's name back after the reload:
+#   1. the join's local rename read back (SMPWRITE ok=1);
+#   2. the host LATCHED the join's name before saving (moved=1) - a run that
+#      never saw it proves nothing, so it fails;
+#   3. the coordinated save/ACK/load round trip ran (SMPSAVE/SMPACK/SMPLOAD ok=1);
+#   4. BOTH sides swapped worlds and read the join's name (SMPPOST ok=1). Coming
+#      back with the pre-rename name is the original bug reproducing.
+# Step 3 runs the same four checks for the FACTION name (SMPFWRITE, SMPFLATCH,
+# SMPFPOST), where the post-load check requires BOTH the displayed field and
+# the saved field (PlayerInterface::factionName) to hold the join's name.
+# Step 4 runs them for the join tab leader's permanent JOBS (SMPJWRITE,
+# SMPJLATCH, SMPJPOST): the type sequence must match, in order.
+function Test-SquadMetaPersist {
+    param([string]$HostFile, [string]$JoinFile)
+    $why = @()
+
+    $w = Select-String -Path $JoinFile -Pattern "SCENARIO SMPWRITE name='([^']*)' readback='([^']*)' ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($null -eq $w) { $why += "join never logged its SMPWRITE" }
+    elseif ($w.Matches[0].Groups[3].Value -ne '1') { $why += "join's local rename did not read back ('$($w.Matches[0].Groups[2].Value)')" }
+
+    $latch = Select-String -Path $HostFile -Pattern "SCENARIO SMPLATCH seen='([^']*)' expect='([^']*)' start='([^']*)' moved=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    $expect = ''
+    if ($null -eq $latch) { $why += "host never latched (SMPLATCH) - the join's tab was unreadable" }
+    else {
+        $g = $latch.Matches[0].Groups
+        $expect = $g[2].Value
+        if ($g[4].Value -eq '1') { Write-Host "    FINDING: host saw the join's tab as '$($g[1].Value)' before the save (the rename reached the authority)" }
+        else { $why += "host still saw '$($g[1].Value)' at save time - the join's rename never reached the authority, so the save cannot carry it" }
+    }
+
+    foreach ($leg in @(@('SMPSAVE', 'coordinated save'), @('SMPACK', 'join save-commit ACK'), @('SMPLOAD', 'mid-session load'))) {
+        $m = Select-String -Path $HostFile -Pattern "SCENARIO $($leg[0]) .*ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $m) { $why += "host never logged its $($leg[1]) ($($leg[0]))" }
+        elseif ($m.Matches[0].Groups[1].Value -ne '1') { $why += "host $($leg[1]) failed" }
+    }
+
+    $postRe = "SCENARIO SMPPOST name='([^']*)' expect='([^']*)' start='([^']*)' ok=(\d) who=(host|join)"
+    $hostPost = ''; $joinPost = ''
+    foreach ($side in @(@($HostFile, 'host'), @($JoinFile, 'join'))) {
+        $file = $side[0]; $tag = $side[1]
+        if ($null -eq (Select-String -Path $file -Pattern 'SCENARIO SMPSWAPDONE' -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            $why += "$tag never completed its world swap (no SMPSWAPDONE)"
+        }
+        $p = Select-String -Path $file -Pattern $postRe -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $p) { $why += "$tag never logged its post-load SMPPOST"; continue }
+        $g = $p.Matches[0].Groups
+        if ($tag -eq 'host') { $hostPost = $g[1].Value } else { $joinPost = $g[1].Value }
+        if ($g[4].Value -ne '1') {
+            $tail = if ($g[1].Value -eq $g[3].Value) { " - this is the pre-rename name, the original Bug #1 wipe" } else { "" }
+            $why += "$tag came back with '$($g[1].Value)', want '$($g[2].Value)'$tail"
+        }
+    }
+    if ($hostPost -ne '' -and $joinPost -ne '' -and $hostPost -ne $joinPost) {
+        $why += "the two clients disagree post-load (host '$hostPost', join '$joinPost')"
+    }
+
+    # ---- Step 3: the faction name ------------------------------------------
+    $fw = Select-String -Path $JoinFile -Pattern "SCENARIO SMPFWRITE name='([^']*)' readback='([^']*)' ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($null -eq $fw) { $why += "join never logged its SMPFWRITE" }
+    elseif ($fw.Matches[0].Groups[3].Value -ne '1') { $why += "join's local faction rename did not read back ('$($fw.Matches[0].Groups[2].Value)')" }
+
+    $fl = Select-String -Path $HostFile -Pattern "SCENARIO SMPFLATCH seen='([^']*)' expect='([^']*)' start='([^']*)' moved=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    $fexpect = ''
+    if ($null -eq $fl) { $why += "host never latched the faction name (SMPFLATCH)" }
+    else {
+        $g = $fl.Matches[0].Groups
+        $fexpect = $g[2].Value
+        if ($g[4].Value -eq '1') { Write-Host "    FINDING: host saw the faction as '$($g[1].Value)' before the save (the join's rename was folded)" }
+        else { $why += "host still saw faction '$($g[1].Value)' at save time - the join's rename never reached the authority" }
+    }
+
+    $fpostRe = "SCENARIO SMPFPOST member='([^']*)' iface='([^']*)' expect='([^']*)' start='([^']*)' ok=(\d) who=(host|join)"
+    $hostF = ''; $joinF = ''
+    foreach ($side in @(@($HostFile, 'host'), @($JoinFile, 'join'))) {
+        $file = $side[0]; $tag = $side[1]
+        $p = Select-String -Path $file -Pattern $fpostRe -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $p) { $why += "$tag never logged its post-load SMPFPOST"; continue }
+        $g = $p.Matches[0].Groups
+        $member = $g[1].Value; $iface = $g[2].Value; $want = $g[3].Value; $start = $g[4].Value
+        if ($tag -eq 'host') { $hostF = $member } else { $joinF = $member }
+        if ($g[5].Value -ne '1') {
+            $tail = if ($member -eq $start) { " - this is the pre-rename name, the original Bug #1 wipe" }
+                    elseif ($member -eq $want) { " - displayed right but the saved field is wrong, so the NEXT load will lose it" }
+                    else { "" }
+            $why += "$tag faction came back as displayed='$member' saved='$iface', want '$want'$tail"
+        }
+    }
+    if ($hostF -ne '' -and $joinF -ne '' -and $hostF -ne $joinF) {
+        $why += "the two clients disagree on the faction post-load (host '$hostF', join '$joinF')"
+    }
+
+    # ---- Step 4: the join tab leader's permanent jobs ----------------------
+    $jw = Select-String -Path $JoinFile -Pattern "SCENARIO SMPJWRITE types='([^']*)' readback='([^']*)' ok=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($null -eq $jw) { $why += "join never logged its SMPJWRITE" }
+    elseif ($jw.Matches[0].Groups[3].Value -ne '1') { $why += "join's local jobs did not read back (got '$($jw.Matches[0].Groups[2].Value)', want '$($jw.Matches[0].Groups[1].Value)')" }
+
+    $jl = Select-String -Path $HostFile -Pattern "SCENARIO SMPJLATCH seen='([^']*)' expect='([^']*)' start='([^']*)' moved=(\d)" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    $jexpect = ''
+    if ($null -eq $jl) { $why += "host never latched the jobs (SMPJLATCH)" }
+    else {
+        $g = $jl.Matches[0].Groups
+        $jexpect = $g[2].Value
+        if ($g[4].Value -eq '1') { Write-Host "    FINDING: host saw the join leader's jobs as [$($g[1].Value)] before the save" }
+        else { $why += "host still saw jobs [$($g[1].Value)] at save time - the join's job list never reached the authority" }
+    }
+
+    $jpostRe = "SCENARIO SMPJPOST types='([^']*)' expect='([^']*)' start='([^']*)' ok=(\d) who=(host|join)"
+    $hostJ = ''; $joinJ = ''
+    foreach ($side in @(@($HostFile, 'host'), @($JoinFile, 'join'))) {
+        $file = $side[0]; $tag = $side[1]
+        $p = Select-String -Path $file -Pattern $jpostRe -ErrorAction SilentlyContinue | Select-Object -Last 1
+        if ($null -eq $p) { $why += "$tag never logged its post-load SMPJPOST"; continue }
+        $g = $p.Matches[0].Groups
+        if ($tag -eq 'host') { $hostJ = $g[1].Value } else { $joinJ = $g[1].Value }
+        if ($g[4].Value -ne '1') {
+            $gotSorted  = (@($g[1].Value -split ',') | Sort-Object) -join ','
+            $wantSorted = (@($g[2].Value -split ',') | Sort-Object) -join ','
+            $tail = if ($g[1].Value -eq $g[3].Value) { " - this is the pre-change list, the original Bug #1 wipe" }
+                    elseif ($gotSorted -eq $wantSorted) { " - right jobs, wrong order" }
+                    else { "" }
+            $why += "$tag jobs came back as [$($g[1].Value)], want [$($g[2].Value)]$tail"
+        }
+    }
+    if ($hostJ -ne '' -and $joinJ -ne '' -and $hostJ -ne $joinJ) {
+        $why += "the two clients disagree on the jobs post-load (host [$hostJ], join [$joinJ])"
+    }
+
+    $v = if ($why.Count -eq 0) { "PASS" } else { "FAIL" }
+    $detail = $why -join "; "
+    Write-Host "  SQUAD-META-PERSIST $v - expect='$expect' hostPost='$hostPost' joinPost='$joinPost' faction expect='$fexpect' host='$hostF' join='$joinF' jobs expect=[$jexpect] host=[$hostJ] join=[$joinJ] $detail"
+    return (Add-GateResult -Name "squad_meta_persist" -Status $v `
+                -Metrics @{ expect = $expect; hostPost = $hostPost; joinPost = $joinPost;
+                            fexpect = $fexpect; hostFaction = $hostF; joinFaction = $joinF;
+                            jexpect = $jexpect; hostJobs = $hostJ; joinJobs = $joinJ } -Detail $detail)
+}
+

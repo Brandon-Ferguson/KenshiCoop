@@ -568,6 +568,53 @@ public:
     // Property-deed sync master enable (KENSHICOOP_DEED_SYNC).
     void setDeedSync(bool v) { deedSync_ = v; }
 
+    // BEFORE engine (protocol 72, BOTH clients, Bug #1): sample the name of
+    // every squad tab THIS client owns (~1 Hz, one representative member per
+    // tab from ownHands_) and publish one PKT_SQUAD_NAME row per tab on change
+    // plus a safety resend. Only owned tabs are published, so a name we wrote
+    // onto a peer's tab can never echo back.
+    void publishSquadNames(const SyncContext& ctx);
+
+    // BEFORE engine (protocol 72): drain received tab names and write each onto
+    // our copy of that tab through any local member (allSquad_). Never writes a
+    // tab we own. A tab with no member resolvable here stays pending - the
+    // sender's safety resend retries it.
+    void applySquadNames(const SyncContext& ctx);
+
+    // BEFORE engine (protocol 72, Bug #1 step 3): sample the displayed player
+    // faction name ~1 Hz. A JOIN that sees it change (a local rename) writes
+    // the save field too and sends a PKT_FACTION_RENAME event, keeping it
+    // pending until the host acks it. The HOST treats a local change as its
+    // own rename (also written to the save field) and broadcasts the
+    // authoritative PKT_FACTION_NAME with per-player acks on change, after a
+    // fold, and on a safety resend.
+    void publishFactionName(const SyncContext& ctx);
+
+    // BEFORE engine (protocol 72): HOST folds join rename events in arrival
+    // order (per-join seq guard), writes both name fields and marks the total
+    // for an immediate broadcast; JOIN adopts the host's name (both fields)
+    // unless its own rename is still unacked. Baselines are updated on every
+    // write so an applied name is never re-detected as a local rename.
+    void applyFactionName(const SyncContext& ctx);
+
+    // BEFORE engine (protocol 72, Bug #1 step 4): sample the permajob list of
+    // every character THIS client owns (~1 Hz, ownHands_) and publish one
+    // PKT_JOBS row per character on change plus a safety resend. Subjects are
+    // expressed in our key space (buildKeyForLocalHand for a minted site).
+    void publishJobs(const SyncContext& ctx);
+
+    // BEFORE engine (protocol 72): drain received job lists and rebuild each
+    // onto our copy of that squad member (never one we own, never a non-squad
+    // body) by clearPermajobs + addJob in order, translating subjects through
+    // the build/fixture maps and counting after every add. A list that did not
+    // fully apply (a rejected add, an unresolved body) stays unconverged so the
+    // sender's resend retries it; after JOBS_GIVEUP_TRIES it is logged once and
+    // left alone until the content changes.
+    void applyJobs(const SyncContext& ctx);
+
+    // Squad-tab and faction name sync master enable (KENSHICOOP_SQUAD_META).
+    void setSquadMetaSync(bool v) { squadMetaSync_ = v; }
+
     // AFTER engine (protocol 55): announce the container/machine-class fixtures
     // near our interest centers so the peer can pair our hand for each with its
     // own copy. Rows are STATIC (position + template), so this is first-sight
@@ -2150,6 +2197,64 @@ private:
     unsigned long deedSampleMs_;
     unsigned long deedAuditMs_; // last wide-state dump (owner-vs-peer diff)
     bool          deedSync_;
+    // Protocol 72 squad-tab names (Bug #1). A tab is keyed by its members' hand
+    // container + containerSerial. Out rows are the tabs we own (what we last
+    // sent); in rows are peers' tabs (stale-row guard per sender).
+    typedef std::pair<u32, u32> TabKey;
+    struct SquadNameOut {
+        std::string   sent;
+        unsigned long lastSendMs;
+        SquadNameOut() : lastSendMs(0) {}
+    };
+    struct SquadNameIn {
+        u32         ownerId;
+        u32         seqSeen;
+        std::string pending; // last name logged as unresolvable (log once)
+        SquadNameIn() : ownerId(0), seqSeen(0) {}
+    };
+    std::map<TabKey, SquadNameOut> squadNameOut_;
+    std::map<TabKey, SquadNameIn>  squadNameIn_;
+    u32           squadNameSeqOut_;
+    unsigned long squadNameSampleMs_;
+    bool          squadMetaSync_;
+    // Protocol 72 player faction name (Bug #1 step 3). Two writers, so the
+    // join sends rename EVENTS and the host owns the total (§16).
+    std::string   facNameSeen_;      // both: last displayed name seen or written
+    bool          facNameSeeded_;    // both: baseline taken this session
+    unsigned long facNameSampleMs_;
+    u32           facRenameSeq_;     // join: monotonic, never reset in-process
+    u32           facRenamePending_; // join: seq of the unacked rename (0 = none)
+    u32           facNameSeqSeen_;   // join: stale guard on host totals
+    std::string   facNameTotal_;     // host: the authoritative name
+    std::string   facNameSent_;      // host: what was last broadcast
+    unsigned long facNameSentMs_;
+    u32           facNameSeqOut_;    // host: monotonic
+    u32           facNameAck_[MAX_PLAYERS]; // host: highest folded seq per player
+    bool          facNameDirty_;     // host: a fold needs an immediate broadcast
+    // Protocol 72 permanent jobs (Bug #1 step 4), keyed by the character hand.
+    // Out rows: characters we own (signature of what we last sent). In rows:
+    // peers' characters (stale guard, last converged signature, retry budget).
+    struct JobsOut {
+        u32           sig;
+        unsigned long lastSendMs;
+        bool          sent;
+        JobsOut() : sig(0), lastSendMs(0), sent(false) {}
+    };
+    struct JobsIn {
+        u32      ownerId;
+        u32      seqSeen;
+        u32      appliedSig; // content signature that fully converged here
+        u32      failSig;    // content signature that keeps failing
+        unsigned tries;      // consecutive incomplete applies of failSig
+        bool     gaveUp;     // failSig logged as given up; no more rebuilds
+        bool     unresolvedLogged;
+        JobsIn() : ownerId(0), seqSeen(0), appliedSig(0), failSig(0), tries(0),
+                   gaveUp(false), unresolvedLogged(false) {}
+    };
+    std::map<Key, JobsOut> jobsOut_;
+    std::map<Key, JobsIn>  jobsIn_;
+    u32           jobsSeqOut_;
+    unsigned long jobsSampleMs_;
     // Protocol 55 runtime-fixture identity. A mine is instantiated per client
     // for a terrain node, so the same physical fixture has a different hand on
     // each side; without a pairing the pose inject resolves nothing (the miner

@@ -417,6 +417,14 @@ void NetLink::queueResearch(const ResearchPacket& pkt) { pushLocked(outCs_, outR
 
 void NetLink::queueDeed(const DeedPacket& pkt) { pushLocked(outCs_, outDeed_, pkt); }
 
+void NetLink::queueSquadName(const SquadNamePacket& pkt) { pushLocked(outCs_, outSquadName_, pkt); }
+
+void NetLink::queueFactionRename(const FactionRenamePacket& pkt) { pushLocked(outCs_, outFactionRename_, pkt); }
+
+void NetLink::queueFactionName(const FactionNamePacket& pkt) { pushLocked(outCs_, outFactionName_, pkt); }
+
+void NetLink::queueJobs(const JobsPacket& pkt) { pushLocked(outCs_, outJobs_, pkt); }
+
 void NetLink::queueFixture(const FixturePacket& pkt) { pushLocked(outCs_, outFixture_, pkt); }
 
 
@@ -513,6 +521,7 @@ bool NetLink::shouldRelayType(u8 type) {
         case PKT_LOAD_REQ:
         case PKT_LOAD_NACK:
         case PKT_MONEY_DELTA:
+        case PKT_FACTION_RENAME: // the host folds it; other joins get PKT_FACTION_NAME
         case PKT_SPAWN_REQ:
         case PKT_COMBAT_HIT:
         case PKT_SPEED_REQ:
@@ -1261,6 +1270,37 @@ void NetLink::threadLoop() {
                         if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &dep)
                             && inbound_) {
                             inbound_->pushDeed(dep.ownerId, dep);
+                        }
+                    } else if (type == PKT_SQUAD_NAME) {
+                        // Reliable squad-tab name (protocol 72): symmetric,
+                        // applied onto tabs this client does not own.
+                        SquadNamePacket snp;
+                        if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &snp)
+                            && inbound_) {
+                            inbound_->pushSquadName(snp.ownerId, snp);
+                        }
+                    } else if (isHost_ && type == PKT_FACTION_RENAME) {
+                        // Reliable faction-rename event (protocol 72, join ->
+                        // host). Ordered delivery makes the fold exactly-once.
+                        FactionRenamePacket frp;
+                        if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &frp)
+                            && inbound_) {
+                            inbound_->pushFactionRename(frp.ownerId, frp);
+                        }
+                    } else if (!isHost_ && type == PKT_FACTION_NAME) {
+                        // Authoritative faction name + acks (protocol 72, host -> all).
+                        FactionNamePacket fnp;
+                        if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &fnp)
+                            && inbound_) {
+                            inbound_->pushFactionName(fnp.ownerId, fnp);
+                        }
+                    } else if (type == PKT_JOBS) {
+                        // Reliable permanent-job list (protocol 72): symmetric,
+                        // rebuilt onto characters this client does not own.
+                        JobsPacket jp;
+                        if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &jp)
+                            && inbound_) {
+                            inbound_->pushJobs(jp.ownerId, jp);
                         }
                     } else if (!isHost_ && type == PKT_PLAYER_ROSTER) {
                         // The player roster (protocol 56), host -> everyone. This
@@ -2188,6 +2228,74 @@ void NetLink::threadLoop() {
         LeaveCriticalSection(&outCs_);
         for (size_t i = 0; i < deedPkts.size(); ++i) {
             ENetPacket* out = enet_packet_create(&deedPkts[i], sizeof(DeedPacket),
+                                                 ENET_PACKET_FLAG_RELIABLE);
+            if (isHost_) {
+                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+            } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+                enet_peer_send(serverPeer_, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+
+        // Drain + send any queued squad-tab name rows on CH_RELIABLE (protocol
+        // 72). SYMMETRIC - each client publishes the tabs it owns; the host's
+        // generic relay forwards a join's row to the other joins.
+        std::vector<SquadNamePacket> squadNamePkts;
+        EnterCriticalSection(&outCs_);
+        squadNamePkts.swap(outSquadName_);
+        LeaveCriticalSection(&outCs_);
+        for (size_t i = 0; i < squadNamePkts.size(); ++i) {
+            ENetPacket* out = enet_packet_create(&squadNamePkts[i], sizeof(SquadNamePacket),
+                                                 ENET_PACKET_FLAG_RELIABLE);
+            if (isHost_) {
+                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+            } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+                enet_peer_send(serverPeer_, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+
+        // Drain + send faction-name rows on CH_RELIABLE (protocol 72). Renames
+        // are join -> host events, names are the host's broadcast; the
+        // Replicator only queues each on its own role, and the receiver checks
+        // the role again.
+        std::vector<FactionRenamePacket> factionRenamePkts;
+        std::vector<FactionNamePacket>   factionNamePkts;
+        EnterCriticalSection(&outCs_);
+        factionRenamePkts.swap(outFactionRename_);
+        factionNamePkts.swap(outFactionName_);
+        LeaveCriticalSection(&outCs_);
+        for (size_t i = 0; i < factionRenamePkts.size(); ++i) {
+            ENetPacket* out = enet_packet_create(&factionRenamePkts[i], sizeof(FactionRenamePacket),
+                                                 ENET_PACKET_FLAG_RELIABLE);
+            if (!isHost_ && serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+                enet_peer_send(serverPeer_, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+        for (size_t i = 0; i < factionNamePkts.size(); ++i) {
+            ENetPacket* out = enet_packet_create(&factionNamePkts[i], sizeof(FactionNamePacket),
+                                                 ENET_PACKET_FLAG_RELIABLE);
+            if (isHost_) {
+                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
+            } else {
+                enet_packet_destroy(out);
+            }
+        }
+
+        // Drain + send permanent-job lists on CH_RELIABLE (protocol 72).
+        // SYMMETRIC - each client publishes the characters it owns; the host's
+        // generic relay forwards a join's list to the other joins. 607 bytes,
+        // well inside one datagram.
+        std::vector<JobsPacket> jobsPkts;
+        EnterCriticalSection(&outCs_);
+        jobsPkts.swap(outJobs_);
+        LeaveCriticalSection(&outCs_);
+        for (size_t i = 0; i < jobsPkts.size(); ++i) {
+            ENetPacket* out = enet_packet_create(&jobsPkts[i], sizeof(JobsPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
             if (isHost_) {
                 enet_host_broadcast(enetHost_, CH_RELIABLE, out);

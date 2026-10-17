@@ -21,12 +21,14 @@ typedef float          f32;
 typedef double         f64;
 
 // Protocol version is checked at handshake; a mismatch is rejected (no back-compat).
-// Public 70 carries complete bag transfers and exact merchant stock/template state.
+// Public 72 adds PKT_SQUAD_NAME, PKT_FACTION_RENAME/PKT_FACTION_NAME and
+// PKT_JOBS (squad names, faction name and permanent jobs, Bug #1) to 70's
+// complete bag transfers and exact merchant stock/template state.
 #ifdef KENSHICOOP_NET_DIAG
-// Private 71 additionally carries bounded, reliable join-log chunks.
-const u16 PROTOCOL_VERSION = 71;
+// Private 73 additionally carries bounded, reliable join-log chunks.
+const u16 PROTOCOL_VERSION = 73;
 #else
-const u16 PROTOCOL_VERSION = 70;
+const u16 PROTOCOL_VERSION = 72;
 #endif
 
 // RELEASE id - a different axis from PROTOCOL_VERSION, and the two are routinely
@@ -104,6 +106,10 @@ enum PacketType {
     PKT_DEED             = 47,// RELIABLE property-ownership row (protocol 54); DeedPacket
     PKT_FIXTURE          = 48,// RELIABLE runtime-fixture identity row (protocol 55); FixturePacket
     PKT_PLAYER_ROSTER    = 49, // RELIABLE display-name table (host -> all, protocol 56); RosterPacket
+    PKT_SQUAD_NAME       = 50, // RELIABLE owner-published squad-tab name (protocol 72); SquadNamePacket
+    PKT_FACTION_RENAME   = 51, // RELIABLE join faction-rename event (join -> host, protocol 72); FactionRenamePacket
+    PKT_FACTION_NAME     = 52, // RELIABLE authoritative faction name + acks (host -> all, protocol 72); FactionNamePacket
+    PKT_JOBS             = 53, // RELIABLE owner-published permanent-job list (protocol 72); JobsPacket
 #ifdef KENSHICOOP_NET_DIAG
     PKT_DEBUG_LOG_FILE   = 250 // private JOIN -> HOST local-log byte stream
 #endif
@@ -1220,6 +1226,81 @@ struct RosterPacket {
 // Optional byte after this unchanged prefix: accepted-member mask (bit id).
 // Distinguishes unnamed connected players from vacant slots. Old readers
 // consume the prefix; new readers use names only when the tail is absent.
+
+// ---- Protocol 72: squad-tab name (Bug #1, docs/design/bug1-squad-meta.md) ----
+// The join's squad names never reached the host, so the host's save - the only
+// one that survives - restored the old names on every load. ONE writer per
+// tab: the client that owns it (the ownership-rank partition) publishes its
+// current name on change plus a safety resend; every other client writes it
+// onto its own copy of that tab, so the host's save carries it.
+//
+// The tab is keyed by the hand CONTAINER of its members (container +
+// containerSerial) - the identity the ownership partition already ranks by,
+// measured equal on both sides by squad_meta_probe. Symmetric (both sides
+// publish their own tabs); the host relays a join's row to the other joins.
+struct SquadNamePacket {
+    u8  type;            // = PKT_SQUAD_NAME
+    u32 ownerId;         // network player id of the sender (the tab's owner)
+    u32 seq;             // per-sender monotonic (stale-row guard)
+    u32 container;       // member hand container of the tab
+    u32 containerSerial; // member hand containerSerial of the tab
+    char name[64];       // NUL-terminated; '' = unreadable, never applied
+};
+
+// ---- Protocol 72: player faction name (Bug #1, step 3) -----------------------
+// ONE shared player faction, TWO writers (any player can rename it), so this
+// replicates the OPERATION, not the value (REPLICATION_PITFALLS §16): a join
+// sends the rename it made as an event; the host folds events in arrival order,
+// writes the result and broadcasts the authoritative name with a per-player
+// ack. A join keeps its own pending rename on screen until an ack covers it, so
+// the name does not bounce back while the event is in flight.
+//
+// Every write - the host's fold, a join adopting the host's name, either side's
+// own local rename - sets BOTH Faction::name (what is displayed) and
+// PlayerInterface::factionName (what the save keeps): squad_meta_probe2 showed
+// the save stores the latter and the load copies it into the former.
+struct FactionRenamePacket {
+    u8  type;            // = PKT_FACTION_RENAME
+    u32 ownerId;         // network player id of the renaming join
+    u32 seq;             // per-join monotonic; the host acks it in FactionNamePacket
+    char name[64];       // NUL-terminated new name
+};
+
+struct FactionNamePacket {
+    u8  type;            // = PKT_FACTION_NAME
+    u32 ownerId;         // the host's network player id
+    u32 seq;             // host monotonic (stale-row guard)
+    u32 ackSeq[MAX_PLAYERS]; // per player id: highest rename seq folded (0 = none)
+    char name[64];       // NUL-terminated authoritative name
+};
+
+// ---- Protocol 72: permanent jobs (Bug #1, step 4) ---------------------------
+// ONE writer per character - the client that owns its squad tab - publishes the
+// ordered permajob list on change plus a safety resend; every other client
+// rebuilds its copy (clearPermajobs, then addJob in list order; both preserve
+// order - squad_meta_probe2) so the host's save carries the join's jobs.
+//
+// The engine silently ignores some adds (squad_meta_probe2: a no-subject
+// JOB_KEEP_EVERYTHING_RUNNING left the count unchanged), so the receiver counts
+// after every add and keeps the row unconverged for the resend to retry.
+// Subjects ride the publisher's key space (a session-placed building as the
+// placer's key, a fixture as the publisher's own hand) and are translated on
+// apply; a subject is carried exactly as read - no value means "none".
+struct JobEntry {
+    u32 type;     // engine TaskType
+    u32 subj[5];  // subject hand [type, container, containerSerial, index, serial]
+    f32 x, y, z;  // location
+};
+const u32 JOBS_MAX = 16; // per character on the wire; more is logged as truncated
+struct JobsPacket {
+    u8  type;      // = PKT_JOBS
+    u32 ownerId;   // network player id of the sender (the squad's owner)
+    u32 seq;       // per-sender monotonic (stale-row guard)
+    u32 hand[5];   // the character [type, container, containerSerial, index, serial]
+    u8  count;     // entries used in jobs[]
+    u8  total;     // the owner's real list length (> count = truncated)
+    JobEntry jobs[JOBS_MAX];
+};
 
 #ifdef KENSHICOOP_NET_DIAG
 // Private log mirror on the bulk channel, distinct from the live game-event

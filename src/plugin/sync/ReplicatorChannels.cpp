@@ -11,6 +11,7 @@
 // PowerShell oracles (see resources/CODE_MAP.md, log-tag index).
 
 #include "ReplicatorUtil.h"
+#include "../../netproto/ContentHash.h" // fnv1aInit/Update (job-list signature)
 
 namespace coop {
 
@@ -1473,6 +1474,495 @@ void Replicator::applyDeeds(const SyncContext& ctx) {
     }
 }
 
+// ---- Protocol 72: squad-tab names (Bug #1) ----------------------------------
+// See the SquadNamePacket comment in Wire.h and docs/design/bug1-squad-meta.md.
+// squad_meta_probe measured the two facts this rests on: a tab's member hand
+// container is identical on both sides, and ActivePlatoon::setName persists
+// through the host's save.
+
+void Replicator::publishSquadNames(const SyncContext& ctx) {
+    NetLink& net = *ctx.net; u32 ownerId = ctx.localId;
+    if (!squadMetaSync_) return;
+    const unsigned long SAMPLE_MS = tuning_.squadNameSampleMs;
+    const unsigned long RESEND_MS = tuning_.squadNameResendMs;
+    unsigned long now = nowMs();
+    if (!sync::gateSampleDue(now, squadNameSampleMs_, SAMPLE_MS)) return;
+    squadNameSampleMs_ = now;
+
+    // One representative member per OWNED tab; any member reads the same
+    // ActivePlatoon name.
+    std::map<TabKey, Key> tabs;
+    for (std::set<Key>::const_iterator it = ownHands_.begin(); it != ownHands_.end(); ++it)
+        tabs.insert(std::make_pair(TabKey(it->c, it->cs), *it));
+
+    for (std::map<TabKey, Key>::const_iterator it = tabs.begin(); it != tabs.end(); ++it) {
+        const Key& k = it->second;
+        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        if (!c) continue;
+        char nm[sizeof(((SquadNamePacket*)0)->name)];
+        if (!engine::squadNameOf(c, nm, sizeof(nm)) || !nm[0]) continue;
+        SquadNameOut& o = squadNameOut_[it->first];
+        bool changed = (o.sent != nm);
+        if (!sync::gateShouldSend(changed, now, o.lastSendMs, /*minSendMs*/ 0,
+                                  RESEND_MS, /*resendUnsent*/ true))
+            continue;
+        o.sent = nm; o.lastSendMs = now;
+        SquadNamePacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type            = (u8)PKT_SQUAD_NAME;
+        pkt.ownerId         = ownerId;
+        pkt.seq             = squadNameSeqOut_++;
+        pkt.container       = it->first.first;
+        pkt.containerSerial = it->first.second;
+        strncpy(pkt.name, nm, sizeof(pkt.name) - 1);
+        net.queueSquadName(pkt);
+        if (changed) { // resends stay silent; the new name is the signal
+            char b[160];
+            _snprintf(b, sizeof(b) - 1, "[squadname] SEND tab=%u.%u name='%s' seq=%u",
+                      pkt.container, pkt.containerSerial, pkt.name, pkt.seq);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+}
+
+void Replicator::applySquadNames(const SyncContext& ctx) {
+    Inbound& in = *ctx.in;
+    std::deque<InboundSquadName> got;
+    in.drainSquadName(got);
+    if (got.empty()) return;
+    if (!squadMetaSync_) return;
+    for (std::deque<InboundSquadName>::iterator it = got.begin(); it != got.end(); ++it) {
+        const SquadNamePacket& p = it->pkt;
+        char nm[sizeof(p.name) + 1];
+        memcpy(nm, p.name, sizeof(p.name));
+        nm[sizeof(p.name)] = '\0';
+        if (!nm[0]) continue;
+        TabKey tab(p.container, p.containerSerial);
+
+        // Never write a tab we own: our own name is the authority for it.
+        bool own = false;
+        for (std::set<Key>::const_iterator k = ownHands_.begin(); k != ownHands_.end(); ++k)
+            if (k->c == tab.first && k->cs == tab.second) { own = true; break; }
+        if (own) continue;
+
+        SquadNameIn& r = squadNameIn_[tab];
+        if (r.ownerId != it->ownerId) { r.ownerId = it->ownerId; r.seqSeen = 0; }
+        if (!sync::gateSeqAccept(r.seqSeen, p.seq)) continue; // stale/dup row
+        r.seqSeen = p.seq;
+
+        Character* c = 0;
+        for (std::set<Key>::const_iterator k = allSquad_.begin();
+             k != allSquad_.end() && !c; ++k)
+            if (k->c == tab.first && k->cs == tab.second)
+                c = engine::resolveCharByHand(k->i, k->s, k->t, k->c, k->cs);
+        if (!c) {
+            // No member of that tab resolves here yet; the sender's safety
+            // resend retries. Logged once per name, not once per resend.
+            if (r.pending != nm) {
+                r.pending = nm;
+                char b[176];
+                _snprintf(b, sizeof(b) - 1,
+                          "[squadname] UNRESOLVED tab=%u.%u from=%u name='%s' seq=%u",
+                          tab.first, tab.second, it->ownerId, nm, p.seq);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            continue;
+        }
+        r.pending.clear();
+        char cur[sizeof(p.name) + 1];
+        engine::squadNameOf(c, cur, sizeof(cur));
+        if (strcmp(cur, nm) == 0) continue; // converged (resend, or the save)
+        bool ok = engine::setSquadNameOf(c, nm);
+        char b[224];
+        _snprintf(b, sizeof(b) - 1,
+                  "[squadname] APPLY tab=%u.%u from=%u name='%s' was='%s' ok=%d seq=%u",
+                  tab.first, tab.second, it->ownerId, nm, cur, ok ? 1 : 0, p.seq);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+}
+
+// ---- Protocol 72: player faction name (Bug #1 step 3) -----------------------
+// See the FactionRenamePacket / FactionNamePacket comment in Wire.h. Every write
+// goes through engine::writePlayerFactionName (both the displayed and the saved
+// field) and moves facNameSeen_ with it, so the sampler never mistakes a name
+// we wrote for a rename the player made.
+
+void Replicator::publishFactionName(const SyncContext& ctx) {
+    GameWorld* gw = ctx.gw; NetLink& net = *ctx.net; u32 ownerId = ctx.localId;
+    if (!squadMetaSync_) return;
+    unsigned long now = nowMs();
+    if (!facNameDirty_ &&
+        !sync::gateSampleDue(now, facNameSampleMs_, tuning_.facNameSampleMs))
+        return;
+    facNameSampleMs_ = now;
+    char cur[sizeof(((FactionNamePacket*)0)->name)];
+    if (!engine::playerFactionName(gw, cur, sizeof(cur)) || !cur[0]) return;
+
+    // First sample of a session: the loaded name is the baseline, not a rename.
+    if (!facNameSeeded_) {
+        facNameSeeded_ = true;
+        facNameSeen_ = cur;
+        if (ctx.isHost) facNameTotal_ = cur;
+        char b[128];
+        _snprintf(b, sizeof(b) - 1, "[facname] SEED name='%s' role=%s", cur,
+                  ctx.isHost ? "host" : "join");
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        if (!ctx.isHost) return;
+    }
+
+    if (ctx.isHost) {
+        if (facNameSeen_ != cur) {
+            // The host player renamed the faction. Make the save field agree,
+            // or the host's own rename would be lost on the next load too.
+            bool ok = engine::writePlayerFactionName(gw, cur);
+            facNameSeen_ = cur;
+            facNameTotal_ = cur;
+            char b[160];
+            _snprintf(b, sizeof(b) - 1, "[facname] LOCAL name='%s' saveField=%d",
+                      cur, ok ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        bool changed = (facNameTotal_ != facNameSent_);
+        if (!sync::gateShouldSend(changed || facNameDirty_, now, facNameSentMs_,
+                                  /*minSendMs*/ 0, tuning_.facNameResendMs,
+                                  /*resendUnsent*/ true))
+            return;
+        facNameSent_ = facNameTotal_; facNameSentMs_ = now; facNameDirty_ = false;
+        FactionNamePacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type    = (u8)PKT_FACTION_NAME;
+        pkt.ownerId = ownerId;
+        pkt.seq     = facNameSeqOut_++;
+        for (u32 i = 0; i < MAX_PLAYERS; ++i) pkt.ackSeq[i] = facNameAck_[i];
+        strncpy(pkt.name, facNameTotal_.c_str(), sizeof(pkt.name) - 1);
+        net.queueFactionName(pkt);
+        if (changed) { // resends and pure acks stay quiet
+            char b[176];
+            _snprintf(b, sizeof(b) - 1,
+                      "[facname] SEND name='%s' seq=%u ack=%u,%u,%u,%u", pkt.name,
+                      pkt.seq, pkt.ackSeq[0], pkt.ackSeq[1], pkt.ackSeq[2], pkt.ackSeq[3]);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        return;
+    }
+
+    // Join: a change we did not write is the player's rename. Report the
+    // EVENT and keep it pending until the host's ack covers it.
+    if (facNameSeen_ == cur) return;
+    bool ok = engine::writePlayerFactionName(gw, cur);
+    facNameSeen_ = cur;
+    facRenamePending_ = ++facRenameSeq_;
+    FactionRenamePacket pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.type    = (u8)PKT_FACTION_RENAME;
+    pkt.ownerId = ownerId;
+    pkt.seq     = facRenamePending_;
+    strncpy(pkt.name, cur, sizeof(pkt.name) - 1);
+    net.queueFactionRename(pkt);
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "[facname] RENAME name='%s' seq=%u saveField=%d",
+              pkt.name, pkt.seq, ok ? 1 : 0);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+}
+
+void Replicator::applyFactionName(const SyncContext& ctx) {
+    GameWorld* gw = ctx.gw; Inbound& in = *ctx.in; u32 localId = ctx.localId;
+    std::deque<InboundFactionRename> renames;
+    std::deque<InboundFactionName> names;
+    in.drainFactionRename(renames);
+    in.drainFactionName(names);
+    if (renames.empty() && names.empty()) return;
+    if (!squadMetaSync_) return;
+
+    if (ctx.isHost) {
+        // Fold join renames in arrival order (reliable + ordered per join).
+        for (std::deque<InboundFactionRename>::iterator it = renames.begin();
+             it != renames.end(); ++it) {
+            const FactionRenamePacket& p = it->pkt;
+            if (it->ownerId >= MAX_PLAYERS) continue;
+            if (p.seq <= facNameAck_[it->ownerId]) continue; // already folded
+            facNameAck_[it->ownerId] = p.seq;
+            facNameDirty_ = true; // even a no-op fold must be acked
+            char nm[sizeof(p.name) + 1];
+            memcpy(nm, p.name, sizeof(p.name));
+            nm[sizeof(p.name)] = '\0';
+            if (!nm[0] || facNameTotal_ == nm) continue;
+            std::string was = facNameTotal_;
+            bool ok = engine::writePlayerFactionName(gw, nm);
+            facNameTotal_ = nm;
+            facNameSeen_ = nm; // our own write: not a host-local rename
+            facNameSeeded_ = true;
+            char b[224];
+            _snprintf(b, sizeof(b) - 1,
+                      "[facname] FOLD from=%u seq=%u name='%s' was='%s' ok=%d",
+                      it->ownerId, p.seq, nm, was.c_str(), ok ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        return;
+    }
+
+    // Join: adopt the host's authoritative name unless our rename is in flight.
+    for (std::deque<InboundFactionName>::iterator it = names.begin();
+         it != names.end(); ++it) {
+        const FactionNamePacket& p = it->pkt;
+        if (!sync::gateSeqAccept(facNameSeqSeen_, p.seq)) continue; // stale/dup
+        facNameSeqSeen_ = p.seq;
+        if (facRenamePending_ != 0 && localId < MAX_PLAYERS &&
+            p.ackSeq[localId] >= facRenamePending_) {
+            char b[96];
+            _snprintf(b, sizeof(b) - 1, "[facname] ACK seq=%u", facRenamePending_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            facRenamePending_ = 0;
+        }
+        if (facRenamePending_ != 0) continue; // keep our own name on screen
+        char nm[sizeof(p.name) + 1];
+        memcpy(nm, p.name, sizeof(p.name));
+        nm[sizeof(p.name)] = '\0';
+        if (!nm[0]) continue;
+        char cur[sizeof(p.name) + 1];
+        engine::playerFactionName(gw, cur, sizeof(cur));
+        if (strcmp(cur, nm) == 0) {
+            facNameSeen_ = nm;
+            facNameSeeded_ = true;
+            continue;
+        }
+        bool ok = engine::writePlayerFactionName(gw, nm);
+        facNameSeen_ = nm;
+        facNameSeeded_ = true;
+        char b[224];
+        _snprintf(b, sizeof(b) - 1,
+                  "[facname] ADOPT name='%s' was='%s' ok=%d seq=%u", nm, cur,
+                  ok ? 1 : 0, p.seq);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+}
+
+// ---- Protocol 72: permanent jobs (Bug #1 step 4) ----------------------------
+// See the JobsPacket comment in Wire.h. squad_meta_probe / squad_meta_probe2
+// measured what this rests on: OrdersReceiver::addJob appends and persists,
+// clear + re-add keeps the order, a no-subject job's subject is not a stable
+// "none" value, and some adds are silently ignored.
+
+namespace {
+// Order-sensitive signature of a job list: type, subject and location rounded
+// to whole units (float noise must not read as a change).
+u32 jobsSignature(const JobEntry* e, unsigned int n) {
+    unsigned int h = fnv1aInit();
+    h = fnv1aUpdate(h, &n, sizeof(n));
+    for (unsigned int i = 0; i < n; ++i) {
+        int loc[3];
+        loc[0] = (int)floor(e[i].x + 0.5f);
+        loc[1] = (int)floor(e[i].y + 0.5f);
+        loc[2] = (int)floor(e[i].z + 0.5f);
+        h = fnv1aUpdate(h, &e[i].type, sizeof(e[i].type));
+        h = fnv1aUpdate(h, e[i].subj, sizeof(e[i].subj));
+        h = fnv1aUpdate(h, loc, sizeof(loc));
+    }
+    return (u32)h;
+}
+
+// "58,57" - the type sequence, for the log lines and the gate.
+void jobTypesText(const JobEntry* e, unsigned int n, char* out, unsigned int cap) {
+    out[0] = '\0';
+    size_t used = 0;
+    for (unsigned int i = 0; i < n; ++i) {
+        int w = _snprintf(out + used, cap - 1 - used, "%s%u", i ? "," : "", e[i].type);
+        if (w < 0) break;
+        used += (size_t)w;
+    }
+    out[cap - 1] = '\0';
+}
+
+// Read a character's list into wire entries (local subjects). -1 = unreadable.
+int readJobEntries(Character* c, JobEntry* out, unsigned int maxOut) {
+    const unsigned int READ_MAX = 32;
+    engine::PermajobRead jr[READ_MAX];
+    int n = engine::readPermajobs(c, jr, READ_MAX);
+    if (n < 0) return -1;
+    unsigned int m = (unsigned int)n < maxOut ? (unsigned int)n : maxOut;
+    if (m > READ_MAX) m = READ_MAX;
+    for (unsigned int i = 0; i < m; ++i) {
+        out[i].type = (u32)jr[i].type;
+        for (unsigned int k = 0; k < 5; ++k) out[i].subj[k] = jr[i].subj[k];
+        out[i].x = jr[i].x; out[i].y = jr[i].y; out[i].z = jr[i].z;
+    }
+    return n;
+}
+} // namespace
+
+void Replicator::publishJobs(const SyncContext& ctx) {
+    NetLink& net = *ctx.net; u32 ownerId = ctx.localId;
+    if (!squadMetaSync_) return;
+    unsigned long now = nowMs();
+    if (!sync::gateSampleDue(now, jobsSampleMs_, tuning_.jobsSampleMs)) return;
+    jobsSampleMs_ = now;
+
+    for (std::set<Key>::const_iterator it = ownHands_.begin(); it != ownHands_.end(); ++it) {
+        const Key& k = *it;
+        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        if (!c) continue;
+        JobEntry jobs[JOBS_MAX];
+        int total = readJobEntries(c, jobs, JOBS_MAX);
+        if (total < 0) continue;
+        unsigned int count = (unsigned int)total < JOBS_MAX ? (unsigned int)total : JOBS_MAX;
+        // Subjects in OUR key space: a site we minted for the peer travels as
+        // the placer's key; everything else (save-resident, our own placement,
+        // our fixtures) is already the key the peer can translate.
+        for (unsigned int i = 0; i < count; ++i) {
+            Key local; local.t = jobs[i].subj[0]; local.c = jobs[i].subj[1];
+            local.cs = jobs[i].subj[2]; local.i = jobs[i].subj[3]; local.s = jobs[i].subj[4];
+            Key wire;
+            if (buildKeyForLocalHand(local, wire)) {
+                jobs[i].subj[0] = wire.t; jobs[i].subj[1] = wire.c; jobs[i].subj[2] = wire.cs;
+                jobs[i].subj[3] = wire.i; jobs[i].subj[4] = wire.s;
+            }
+        }
+        u32 sig = jobsSignature(jobs, count);
+        JobsOut& o = jobsOut_[k];
+        bool changed = !o.sent || o.sig != sig;
+        if (!sync::gateShouldSend(changed, now, o.lastSendMs, /*minSendMs*/ 0,
+                                  tuning_.jobsResendMs, /*resendUnsent*/ true))
+            continue;
+        o.sig = sig; o.sent = true; o.lastSendMs = now;
+        JobsPacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type    = (u8)PKT_JOBS;
+        pkt.ownerId = ownerId;
+        pkt.seq     = jobsSeqOut_++;
+        pkt.hand[0] = k.t; pkt.hand[1] = k.c; pkt.hand[2] = k.cs;
+        pkt.hand[3] = k.i; pkt.hand[4] = k.s;
+        pkt.count   = (u8)count;
+        pkt.total   = (u8)(total > 255 ? 255 : total);
+        for (unsigned int i = 0; i < count; ++i) pkt.jobs[i] = jobs[i];
+        net.queueJobs(pkt);
+        if (changed) { // resends stay silent; the new list is the signal
+            char types[96];
+            jobTypesText(jobs, count, types, sizeof(types));
+            char b[224];
+            _snprintf(b, sizeof(b) - 1,
+                      "[jobs] SEND char=%u.%u.%u.%u.%u n=%u total=%d types=[%s] seq=%u",
+                      k.t, k.c, k.cs, k.i, k.s, count, total, types, pkt.seq);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            if ((unsigned int)total > JOBS_MAX) {
+                _snprintf(b, sizeof(b) - 1,
+                          "[jobs] TRUNCATED char=%u.%u.%u.%u.%u total=%d sent=%u",
+                          k.t, k.c, k.cs, k.i, k.s, total, count);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+    }
+}
+
+void Replicator::applyJobs(const SyncContext& ctx) {
+    Inbound& in = *ctx.in;
+    std::deque<InboundJobs> got;
+    in.drainJobs(got);
+    if (got.empty()) return;
+    if (!squadMetaSync_) return;
+    const unsigned int JOBS_GIVEUP_TRIES = 6; // ~1 min of resends
+    for (std::deque<InboundJobs>::iterator it = got.begin(); it != got.end(); ++it) {
+        const JobsPacket& p = it->pkt;
+        Key k; k.t = p.hand[0]; k.c = p.hand[1]; k.cs = p.hand[2];
+        k.i = p.hand[3]; k.s = p.hand[4];
+        // Only a PEER's squad member: never a body we own (our list is the
+        // authority), never a world NPC that happens to share a hand.
+        if (ownHands_.count(k) != 0) continue;
+        if (allSquad_.count(k) == 0) continue;
+        JobsIn& r = jobsIn_[k];
+        if (r.ownerId != it->ownerId) { r.ownerId = it->ownerId; r.seqSeen = 0; }
+        if (!sync::gateSeqAccept(r.seqSeen, p.seq)) continue; // stale/dup row
+        r.seqSeen = p.seq;
+
+        unsigned int count = p.count < JOBS_MAX ? p.count : JOBS_MAX;
+        // Desired list in OUR key space: a placed site through the build map,
+        // a runtime fixture through the fixture pairing, anything else as sent.
+        JobEntry want[JOBS_MAX];
+        for (unsigned int i = 0; i < count; ++i) {
+            want[i] = p.jobs[i];
+            Key wire; wire.t = p.jobs[i].subj[0]; wire.c = p.jobs[i].subj[1];
+            wire.cs = p.jobs[i].subj[2]; wire.i = p.jobs[i].subj[3]; wire.s = p.jobs[i].subj[4];
+            unsigned int local[5];
+            if (localHandForBuildKey(wire, local) || localHandForFixtureKey(wire, local))
+                for (unsigned int h = 0; h < 5; ++h) want[i].subj[h] = local[h];
+        }
+        u32 wantSig = jobsSignature(want, count);
+        if (r.appliedSig == wantSig && r.appliedSig != 0) continue; // converged
+        if (r.gaveUp && r.failSig == wantSig) continue;             // logged once
+
+        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        if (!c) {
+            if (!r.unresolvedLogged) {
+                r.unresolvedLogged = true;
+                char b[160];
+                _snprintf(b, sizeof(b) - 1,
+                          "[jobs] UNRESOLVED char=%u.%u.%u.%u.%u from=%u seq=%u",
+                          k.t, k.c, k.cs, k.i, k.s, it->ownerId, p.seq);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            continue; // the resend retries
+        }
+        r.unresolvedLogged = false;
+
+        // Already identical here (the save, or a resend after convergence)?
+        JobEntry have[JOBS_MAX];
+        int haveN = readJobEntries(c, have, JOBS_MAX);
+        if (haveN >= 0 && (unsigned int)haveN == count &&
+            jobsSignature(have, count) == wantSig) {
+            r.appliedSig = wantSig;
+            r.failSig = 0; r.tries = 0; r.gaveUp = false;
+            continue;
+        }
+
+        // Rebuild: clear, then add in order, counting after every add.
+        engine::clearPermajobs(c);
+        unsigned int added = 0, rejected = 0;
+        char rejectedTypes[96]; rejectedTypes[0] = '\0';
+        size_t rUsed = 0;
+        for (unsigned int i = 0; i < count; ++i) {
+            JobEntry before[1];
+            int nb = readJobEntries(c, before, 0);
+            engine::addPermajob(c, (int)want[i].type, want[i].subj,
+                                want[i].x, want[i].y, want[i].z);
+            int na = readJobEntries(c, before, 0);
+            if (nb >= 0 && na == nb + 1) { ++added; continue; }
+            ++rejected;
+            int w = _snprintf(rejectedTypes + rUsed, sizeof(rejectedTypes) - 1 - rUsed,
+                              "%s%u", rUsed ? "," : "", want[i].type);
+            if (w > 0) rUsed += (size_t)w;
+        }
+        rejectedTypes[sizeof(rejectedTypes) - 1] = '\0';
+
+        char types[96];
+        jobTypesText(want, count, types, sizeof(types));
+        char b[256];
+        _snprintf(b, sizeof(b) - 1,
+                  "[jobs] APPLY char=%u.%u.%u.%u.%u from=%u n=%u added=%u was=%d "
+                  "types=[%s] seq=%u", k.t, k.c, k.cs, k.i, k.s, it->ownerId, count,
+                  added, haveN, types, p.seq);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+
+        if (rejected == 0) {
+            r.appliedSig = wantSig;
+            r.failSig = 0; r.tries = 0; r.gaveUp = false;
+            continue;
+        }
+        // Incomplete: stay unconverged so the resend retries; never silent.
+        if (r.failSig != wantSig) { r.failSig = wantSig; r.tries = 0; r.gaveUp = false; }
+        ++r.tries;
+        _snprintf(b, sizeof(b) - 1,
+                  "[jobs] ADD-REJECTED char=%u.%u.%u.%u.%u types=[%s] try=%u",
+                  k.t, k.c, k.cs, k.i, k.s, rejectedTypes, r.tries);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        if (r.tries >= JOBS_GIVEUP_TRIES) {
+            r.gaveUp = true;
+            _snprintf(b, sizeof(b) - 1,
+                      "[jobs] GAVEUP char=%u.%u.%u.%u.%u types=[%s] after=%u tries",
+                      k.t, k.c, k.cs, k.i, k.s, rejectedTypes, r.tries);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+}
+
 // ---- Protocol 55: runtime-fixture identity ----------------------------------
 // See the FixturePacket comment in Wire.h for the measurement that motivates
 // this channel (the same mine carrying hand 50.2399902464 on the host and
@@ -1911,7 +2401,12 @@ void Replicator::driveSampledChannels(const SyncContext& ctx) {
         { &Replicator::fixtureSync_,  0,                     &Replicator::publishFixtures,   &Replicator::applyFixtures,   false },
         { &Replicator::prodSync_,     0,                     &Replicator::publishProd,       &Replicator::applyProd,       true  },
         { &Replicator::researchSync_, 0,                     &Replicator::publishResearch,   &Replicator::applyResearch,   true  },
-        { &Replicator::deedSync_,     0,                     &Replicator::publishDeeds,      &Replicator::applyDeeds,      false }
+        { &Replicator::deedSync_,     0,                     &Replicator::publishDeeds,      &Replicator::applyDeeds,      false },
+        { &Replicator::squadMetaSync_, 0,                    &Replicator::publishSquadNames, &Replicator::applySquadNames, false },
+        // Symmetric row: both roles publish (join = rename events, host = the
+        // total) and both apply (host = fold, join = adopt).
+        { &Replicator::squadMetaSync_, 0,                    &Replicator::publishFactionName, &Replicator::applyFactionName, false },
+        { &Replicator::squadMetaSync_, 0,                    &Replicator::publishJobs,       &Replicator::applyJobs,       false }
     };
     const int n = (int)(sizeof(kCh) / sizeof(kCh[0]));
     for (int i = 0; i < n; ++i) {
@@ -2009,6 +2504,17 @@ void Replicator::onPeerConnected(NetLink& net, u32 ownerId) {
     for (std::map<Key, DeedRow>::iterator it = deedRows_.begin();
          it != deedRows_.end(); ++it)
         if (it->second.lastSendMs != 0) { it->second.lastSendMs = 1; ++nDeed; }
+    // Squad-tab names (protocol 72): same ageing, so the newcomer learns our
+    // tab names on the next sample. Not added to the RESYNC line below - its
+    // format is parsed by the oracles.
+    for (std::map<TabKey, SquadNameOut>::iterator it = squadNameOut_.begin();
+         it != squadNameOut_.end(); ++it)
+        if (it->second.lastSendMs != 0) it->second.lastSendMs = 1;
+    // The host's faction-name total: same ageing (one value, like the pool).
+    if (facNameSentMs_ != 0) facNameSentMs_ = 1;
+    // Permanent-job lists (protocol 72): same ageing as the tab names.
+    for (std::map<Key, JobsOut>::iterator it = jobsOut_.begin(); it != jobsOut_.end(); ++it)
+        if (it->second.lastSendMs != 0) it->second.lastSendMs = 1;
 
     char b[240];
     _snprintf(b, sizeof(b) - 1,
