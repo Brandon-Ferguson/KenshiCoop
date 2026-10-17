@@ -152,6 +152,20 @@ ring stance near the target) is unaffected.
   attack order. The next measurement is how long host combat episodes last
   as the join receives them, phantom versus real, to see whether an onset
   debounce (arm only after N ms of continuous combat stream) splits them.
+- **Episode probe (step 2, built, not yet run).** Read-only. One line per
+  combat episode, written when the copy disarms:
+  ```
+  [combat] episode hand=<i,s> isSquad=<0|1> dur=<ms> maxGap=<ms> ticks=<n> fought=<n> hold=<n> holdFought=<n> orders=<n> why=<timeout|break>
+  ```
+  - `dur`: the first to the last drive tick that saw a streamed combat task.
+  - `maxGap`: the longest silence inside the episode.
+  - `fought`: the copy's engaged ticks while combat was streamed.
+  - `hold` / `holdFought`: the same counts during the 4 s hold after the
+    stream stopped.
+  - A host blip turned into a committed fight should show a short `dur` with
+    `fought` and `holdFought` high; a real fight, a long `dur`.
+  - Episodes that end without a disarm (body culled, ownership flip) log
+    nothing.
 - **A/B gate:** `mint_aggro` x3 with the gate on and x3 with it off.
   `one_sided_fight` must fail with the gate off and pass with it on.
 - **Regression:**

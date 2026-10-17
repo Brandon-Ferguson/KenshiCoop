@@ -1283,6 +1283,18 @@ void Replicator::applyTargets(GameWorld* gw) {
                 }
             }
             bool hostWaiting = coop::taskIsCombatWait(out.task);
+            // Episode probe bookkeeping (read-only): measured before
+            // combatSeenTick moves, so the gap is the one since the last
+            // combat-streamed tick of this episode.
+            if (!d.combatArmed || d.combatEpStart == 0) { // new episode (the order below arms it)
+                d.combatEpStart = now;
+                d.combatEpMaxGap = 0; d.combatEpTicks = 0; d.combatEpFought = 0;
+                d.combatEpHold = 0; d.combatEpHoldFought = 0;
+            } else if (d.combatSeenTick != 0 &&
+                       (now - d.combatSeenTick) > d.combatEpMaxGap) {
+                d.combatEpMaxGap = now - d.combatSeenTick;
+            }
+            ++d.combatEpTicks;
             d.combatSeenTick = now; // feeds the disarm debounce below
             // Do NOT separateIntoMyOwnSquad here. Re-containering the body
             // breaks the streamed hand: resolve() misses, a proxy mints on
@@ -1295,6 +1307,7 @@ void Replicator::applyTargets(GameWorld* gw) {
             // between combo sections and slot rotations (the crowd lesson).
             bool localFighting = engine::readCombat(c, &lc) &&
                                  (lc.inCombat || lc.modeActive);
+            if (localFighting) ++d.combatEpFought;
             // The copy is engaged with the WRONG body (the local brawl grabbed it).
             bool wrongLocalTgt = localFighting && lc.hasTarget &&
                 (lc.target[3] != out.sIndex || lc.target[4] != out.sSerial);
@@ -1577,6 +1590,10 @@ void Replicator::applyTargets(GameWorld* gw) {
                 ? dist3(ax, ay, az, out.x, out.y, out.z) : 0.0f;
             if ((now - d.combatSeenTick) < COMBAT_DISARM_MS &&
                 heldDrift <= combatBigSnapDist_) {
+                ++d.combatEpHold;
+                { engine::CombatRead hc;
+                  if (engine::readCombat(c, &hc) && (hc.inCombat || hc.modeActive))
+                      ++d.combatEpHoldFought; }
                 if (isSquad) {
                     engine::applyRaw(c, out);
                     engine::applyMotion(c, true, out.cSpeed,
@@ -1592,6 +1609,25 @@ void Replicator::applyTargets(GameWorld* gw) {
                     "[combat] hold BREAK hand=%u,%u drift=%.1f gap=%lums",
                     out.hIndex, out.hSerial, heldDrift, now - d.combatSeenTick);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            // Episode probe (read-only): how long the OWNER streamed combat
+            // for this body versus how long our copy fought for it. dur =
+            // first to last combat-streamed tick; maxGap = longest silence
+            // inside it; fought/hold = engaged ticks while streamed / while
+            // held after the stream stopped. A host blip that our order turns
+            // into a committed fight shows as short dur, long hold-fought.
+            if (d.combatEpStart != 0) {
+                unsigned long dur = (d.combatSeenTick >= d.combatEpStart)
+                    ? d.combatSeenTick - d.combatEpStart : 0;
+                char eb[224]; _snprintf(eb, sizeof(eb) - 1,
+                    "[combat] episode hand=%u,%u isSquad=%d dur=%lums maxGap=%lums "
+                    "ticks=%u fought=%u hold=%u holdFought=%u orders=%u why=%s",
+                    out.hIndex, out.hSerial, isSquad ? 1 : 0, dur, d.combatEpMaxGap,
+                    d.combatEpTicks, d.combatEpFought, d.combatEpHold,
+                    d.combatEpHoldFought, d.combatOrders,
+                    heldDrift > combatBigSnapDist_ ? "break" : "timeout");
+                eb[sizeof(eb) - 1] = '\0'; coop::logLine(eb);
+                d.combatEpStart = 0;
             }
             d.combatArmed = false;
             d.combatOrders = 0;

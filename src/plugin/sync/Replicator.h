@@ -927,6 +927,15 @@ private:
         u32          combatTgtSer;    //   so a host-side retarget re-issues immediately
         unsigned long combatSeenTick; // last tick the host stream reported combat (the
                                       //   disarm DEBOUNCE: a 1-batch gap must not reset the AI)
+        // Read-only episode probe (hostile-squad desync, 2026-10-17): one host
+        // combat episode as this client RECEIVES it, first combat sample to
+        // disarm. Logged once as "[combat] episode" when the episode disarms.
+        unsigned long combatEpStart;  // first streamed combat sample of the episode (0 = none)
+        unsigned long combatEpMaxGap; // longest gap between two combat-streamed ticks in it (ms)
+        unsigned int  combatEpTicks;  // drive ticks that saw a streamed combat task
+        unsigned int  combatEpFought; //   ...of those, ticks the local copy read engaged
+        unsigned int  combatEpHold;   // hold ticks (stream no longer combat, not yet disarmed)
+        unsigned int  combatEpHoldFought; // ...of those, ticks the local copy read engaged
         unsigned long combatSnapTick; // last hard snap (cooldown; a failed teleport must not
                                       //   re-fire every frame - walk-converge between snaps)
         unsigned long combatSnapCount;// cumulative combat hard-snaps on this hand (Phase 1 warp
@@ -1038,7 +1047,10 @@ private:
                    koLatched(false), deathLatched(false), carriedDown(false),
                    combatArmed(false), combatTick(0), combatOrders(0),
                    combatTgtIdx(0), combatTgtSer(0),
-                   combatSeenTick(0), combatSnapTick(0), combatSnapCount(0),
+                   combatSeenTick(0),
+                   combatEpStart(0), combatEpMaxGap(0), combatEpTicks(0), combatEpFought(0),
+                   combatEpHold(0), combatEpHoldFought(0),
+                   combatSnapTick(0), combatSnapCount(0),
                    combatOverTick(0), npcSnapTick(0), hadCarry(false),
                    goalsCleared(false),
                    trusted(false), agreeStreak(0),
