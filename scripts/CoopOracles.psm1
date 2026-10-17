@@ -265,6 +265,7 @@ function Invoke-OneOracle {
         "town_pop_parity" { return (Test-TownPopParity -HostFile $HostLog -JoinFile $JoinLog) }
         "world_parity"  { return (Test-WorldParity     -HostFile $HostLog -JoinFile $JoinLog) }
         "cell_probe"    { return (Test-CellProbe       -HostFile $HostLog -JoinFile $JoinLog) }
+        "friend_indoors" { return (Test-FriendIndoors  -HostFile $HostLog -JoinFile $JoinLog) }
         "camp_approach" { return (Test-CampApproach    -HostFile $HostLog -JoinFile $JoinLog) }
         "mint_dist"     { return (Test-MintDistance    -JoinFile $JoinLog) }
         "anti_zombie"   { return (Test-AntiZombie      -HostFile $HostLog -JoinFile $JoinLog) }
@@ -509,7 +510,7 @@ Export-ModuleMember -Function @(
     "Get-WnpcRows", "Get-WorldRows", "Group-WnpcSamples", "Test-FollowTravel", "Test-TravelParity",
     "Test-SplitFar", "Test-SplitFar2", "Test-DualDrive", "Test-RunApart",
     "Get-TownArriveData", "Get-TownAuditRows", "Test-TownArrive", "Test-TownPopParity",
-    "Test-WorldParity", "Test-CellProbe",
+    "Test-WorldParity", "Test-CellProbe", "Test-FriendIndoors",
     "Test-CampApproach",
     "Test-MintDistance", "Test-AntiZombie", "Test-Lifecycle",
     "Get-PanelConnects", "Get-PanelIntents", "Test-PanelConfig",

@@ -2824,3 +2824,110 @@ function Test-CellProbe {
                             tabs = $m.tabs; tabCells = $m.tabCells; samples = $m.samples
                             hostCellX = $h.cellX; joinCellX = $j.cellX })
 }
+
+# friend_indoors (bug #16 probe, docs/design/bug16-host-black-interior.md): does a
+# client draw a building's interior open when only the OTHER player's characters
+# are inside it? Probe tier: FAILs only when the setup did not happen (leaders not
+# inside the bar in BASE, both sides latched different buildings, the host still
+# inside in WATCH, the joiner not inside in WATCH, the host camera never followed
+# the joiner); the open/closed rates and the verdict are FINDINGs.
+#
+# Lines (both sides, 1 Hz):
+#   SCENARIO INDOOR ROW who=W phase=P lead=own|peer|other ... inside=t.c.cs.i.s res=R ... open=O sel=S
+#   SCENARIO INDOOR BAR who=W phase=P bar=t.c.cs.i.s open=O vis=V int=I
+# A hand whose index and serial are both 0 is "outdoors".
+function Test-FriendIndoors {
+    param([string]$HostFile, [string]$JoinFile)
+    $why = @()
+    $hostLines = @(Get-Content -Path $HostFile -ErrorAction SilentlyContinue)
+    $join      = @(Get-Content -Path $JoinFile -ErrorAction SilentlyContinue)
+
+    function Get-IndoorRows($lines, [string]$who, [string]$lead) {
+        $out = @()
+        foreach ($m in ($lines | Select-String -Pattern "SCENARIO INDOOR ROW who=$who phase=(\w+) lead=$lead name='[^']*' hand=\S+ inside=(\d+)\.(\d+)\.(\d+)\.(\d+)\.(\d+) res=(-?\d+) vis=(-?\d+) int=(-?\d+) open=(-?\d+) sel=(-?\d+)")) {
+            $g = $m.Matches[0].Groups
+            $out += [pscustomobject]@{
+                phase = $g[1].Value
+                inside = "$($g[2].Value).$($g[3].Value).$($g[4].Value).$($g[5].Value).$($g[6].Value)"
+                outdoors = ($g[5].Value -eq '0' -and $g[6].Value -eq '0')
+                res = [int]$g[7].Value; open = [int]$g[10].Value; sel = [int]$g[11].Value }
+        }
+        return $out
+    }
+    function Get-BarRows($lines, [string]$who) {
+        $out = @()
+        foreach ($m in ($lines | Select-String -Pattern "SCENARIO INDOOR BAR who=$who phase=(\w+) bar=(\S+) open=(-?\d+) vis=(-?\d+) int=(-?\d+)")) {
+            $g = $m.Matches[0].Groups
+            $out += [pscustomobject]@{ phase = $g[1].Value; bar = $g[2].Value
+                open = [int]$g[3].Value; vis = [int]$g[4].Value; int = [int]$g[5].Value }
+        }
+        return $out
+    }
+    # Share of rows (in a phase) matching a predicate; -1 when there are none.
+    function Get-Share($rows, [string]$phase, [scriptblock]$pred) {
+        $r = @($rows | Where-Object { $_.phase -eq $phase })
+        if ($r.Count -eq 0) { return -1 }
+        return [math]::Round(@($r | Where-Object $pred).Count / $r.Count, 2)
+    }
+
+    $hOwn  = @(Get-IndoorRows $hostLines 'host' 'own')
+    $hPeer = @(Get-IndoorRows $hostLines 'host' 'peer')
+    $jOwn  = @(Get-IndoorRows $join 'join' 'own')
+    $jPeer = @(Get-IndoorRows $join 'join' 'peer')
+    $hBar  = @(Get-BarRows $hostLines 'host')
+    $jBar  = @(Get-BarRows $join 'join')
+
+    # ---- Setup checks ----
+    $hBase = Get-Share $hOwn 'base' { $_.res -eq 1 }
+    $jBase = Get-Share $jOwn 'base' { $_.res -eq 1 }
+    if ($hBase -lt 0.5) { $why += "host leader was inside a building in only $hBase of BASE samples" }
+    if ($jBase -lt 0.5) { $why += "join leader was inside a building in only $jBase of BASE samples" }
+    $hBarId = if ($hBar.Count -gt 0) { $hBar[0].bar } else { '' }
+    $jBarId = if ($jBar.Count -gt 0) { $jBar[0].bar } else { '' }
+    if ($hBarId -eq '' -or $jBarId -eq '') { $why += "a side never latched its building (host='$hBarId' join='$jBarId')" }
+    elseif ($hBarId -ne $jBarId) { $why += "host and join latched different buildings (host=$hBarId join=$jBarId)" }
+    $hOut = Get-Share $hOwn 'watch' { $_.outdoors -or $_.inside -ne $hBarId }
+    if ($hOut -lt 0.8) { $why += "host leader was out of the bar in only $hOut of WATCH samples - the park did not take it outside" }
+    $jIn = Get-Share $jOwn 'watch' { $_.inside -eq $jBarId }
+    if ($jIn -lt 0.8) { $why += "join leader was inside the bar in only $jIn of WATCH samples" }
+    $focus = @($hostLines | Select-String -Pattern "SCENARIO INDOOR FOCUS who=host on=peer ok=1").Count
+    if ($focus -eq 0) { $why += "host camera never followed the joiner (no FOCUS on=peer ok=1)" }
+    $hWatchBar = @($hBar | Where-Object { $_.phase -eq 'watch' -and $_.open -ge 0 })
+    if ($hWatchBar.Count -lt 10) { $why += "host has only $($hWatchBar.Count) readable BAR samples in WATCH (< 10)" }
+
+    # ---- Findings ----
+    $hOpen = @{}; $jOpen = @{}
+    foreach ($p in 'base', 'out', 'watch') {
+        $hOpen[$p] = Get-Share $hBar $p { $_.open -eq 1 }
+        $jOpen[$p] = Get-Share $jBar $p { $_.open -eq 1 }
+    }
+    # The host's copy of the joiner's leader: does the HOST think it is inside the bar?
+    $copyIn  = Get-Share $hPeer 'watch' { $_.inside -eq $hBarId }
+    $copySel = Get-Share $hPeer 'watch' { $_.sel -eq 1 }
+    # And the join's copy of the host leader once the host left (symmetry check).
+    $jCopyIn = Get-Share $jPeer 'watch' { $_.inside -eq $jBarId }
+
+    Write-Host "    FINDING: bar host=$hBarId join=$jBarId; leaders inside in BASE host=$hBase join=$jBase"
+    Write-Host "    FINDING: bar drawn OPEN - host base=$($hOpen['base']) out=$($hOpen['out']) watch=$($hOpen['watch']); join base=$($jOpen['base']) watch=$($jOpen['watch'])"
+    Write-Host "    FINDING: WATCH - host leader outside $hOut, join leader inside $jIn; host's copy of the joiner marked inside the bar $copyIn (selected $copySel); join's copy of the host marked inside $jCopyIn"
+    $verdict = "inconclusive"
+    if ($hOpen['watch'] -ge 0 -and $jOpen['watch'] -ge 0) {
+        if ($hOpen['watch'] -le 0.2 -and $jOpen['watch'] -ge 0.8) {
+            $h = if ($copyIn -ge 0.8) { "H2: the host's copy IS marked inside, yet the interior stays closed" }
+                 elseif ($copyIn -le 0.2) { "H1: the host's copy is NOT marked inside" }
+                 else { "mixed: the copy is marked inside $copyIn of the time" }
+            $verdict = "Bug #16 REPRODUCED - the host draws the bar closed while only the joiner is inside ($h)"
+        } elseif ($hOpen['watch'] -ge 0.8) {
+            $verdict = "Bug #16 NOT reproduced - the host draws the bar open while only the joiner is inside"
+        }
+    }
+    Write-Host "    FINDING: $verdict"
+
+    $v = if ($why.Count -eq 0) { "PASS" } else { "FAIL" }
+    $detail = $why -join "; "
+    Write-Host "  FRIEND-INDOORS $v - hostOpenWatch=$($hOpen['watch']) joinOpenWatch=$($jOpen['watch']) copyInside=$copyIn $detail"
+    return (Add-GateResult -Name "friend_indoors" -Status $v `
+                -Metrics @{ hostOpenBase = $hOpen['base']; hostOpenOut = $hOpen['out']; hostOpenWatch = $hOpen['watch'];
+                            joinOpenBase = $jOpen['base']; joinOpenWatch = $jOpen['watch'];
+                            copyInside = $copyIn; joinCopyInside = $jCopyIn; hostOutside = $hOut; joinInside = $jIn } -Detail $detail)
+}

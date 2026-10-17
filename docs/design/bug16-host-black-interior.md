@@ -1,0 +1,137 @@
+# Bug #16 design: a building goes black when watched from the other client
+
+Status: **step 1 (read-only probe + friend_indoors scenario) written and built; verify passes; not yet run in game** —
+October 16, 2026.
+Bug source: seen by Brandon during melee_together runs; docs/PROJECT_BRIEF.md bug
+table row 16.
+
+## Symptom
+
+During melee_together the host window intermittently showed the bar with no
+building, floor or roof: a black void with the fighting characters, a terrain
+slab and a rock still drawn. The join's window rendered the bar normally.
+Captured at 22:20:34 in run 20261016_221816
+(`tools/test-runs/bug16_222034_614.png`).
+
+## What the logs show (both timed sightings)
+
+| | Run 20261016_221532 | Run 20261016_221816 |
+|---|---|---|
+| Sighting | ~22:17:50-22:18:00 (Brandon's report) | 22:20:34 (screenshot) |
+| Phase | APART (22:17:32-22:18:02) | APART (22:20:15-22:20:45) |
+| Host character | parked 6000 u out of the bar at 22:17:18 | parked out at 22:20:01 |
+| Host camera | `[cam] center=-51193.9,1581.0,2646.2` (the bar) before and after | same |
+| Bar zone 20,32 on the host | still loaded (bed census reads it) | still loaded |
+
+The bar's interior furniture (`[bed] ROW ... inside=...95.2594726656`)
+records which state each client draws the bar in:
+
+| Client | While own character is in the bar | After the host's character left |
+|---|---|---|
+| Host | `visibleFlag=0` (from 22:18:59) | `visibleFlag=1` (from 22:20:14) |
+| Join | `visibleFlag=0` (from 22:19:32) | stays `0` |
+
+So the zone did not unload. The host switched the bar back to its "no player
+character inside" state when its own character left, even though the joiner's
+character was still inside on the host's screen.
+
+## Hypothesis (to confirm in step 1, not yet proven)
+
+Kenshi decides which building interiors a client draws open from its player
+characters' indoor state (`RootObject::isInsideBuilding`, fed through
+`PlayerInterface::updateFloorVisibility` into `PlayerInterface::interiorsVisible`).
+The other player's characters exist on each client as driven copies. The mod
+moves them kinematically and never reads or syncs indoor state (no use of
+`isIndoors` / `isInsideBuilding` / `notifyIndoors` anywhere in `src/plugin`), so a
+copy may never be marked as inside. With none of your own characters inside, the
+building is drawn closed, and a camera inside a closed building shows the black
+"dark interior" with only the characters and outside terrain drawn.
+
+If that holds, this is not test-only: in real play, either player who follows
+the friend's character into a shop or bar, with none of their own characters
+inside, would see the black void.
+
+Two things the logs cannot yet tell apart:
+
+1. The peer copy is **not marked inside** (indoor state never set on copies).
+2. The peer copy **is marked inside**, but Kenshi only opens interiors for some
+   subset (for example selected characters) that never includes a copy.
+
+The fix differs between them, so step 1 measures before anything changes.
+
+## Separate from this bug
+
+- The scenario artifact: melee_together parks the host's character but never
+  moves its camera (`park()` does not move the camera; `Engine.h` documents this
+  and provides `cameraFocusOn`). That made the void easy to see but is not the
+  cause. Fixing the scenario is step 3 and touches test code only.
+- The "slightly desynced" characters Brandon saw during TOGETHER. Not part of
+  this fix; the existing `[proxy] drift` lines already record it for afterwards.
+
+## Plan
+
+### Step 1 - read-only probe and the friend_indoors scenario (this branch)
+
+No behaviour change. Everything lives in Harness-only translation units
+(excluded from the Release build in `KenshiCoop.vcxproj`).
+
+- `engine::probeIndoors` (new Harness-only `game/IndoorProbe.cpp`): for every
+  player-faction character, read under SEH:
+  - its hand and name,
+  - `RootObject::isInsideBuilding` (a plain field, no virtual call),
+  - the building it names, resolved through the engine's own hand resolver
+    and checked to be a building: `getVisible()` and `interiorVisibility`,
+  - `PlayerInterface::getInteriorsVisible(building)` (the engine's own read-only
+    query; assumed to be a pure getter from its name and signature - it has
+    no KenshiLib body to read, which is one reason this stays Harness-only),
+  - plus the client's `selectedCharacter` and camera centre.
+- New scenario `friend_indoors` (save `sync`, both squads start in the bar):
+  - BASE 8-20 s: both stay in the bar, cameras on their own leaders.
+  - OUT at 20 s: the host parks its tab ~1500 u along +x, outside the bar
+    but in the same town and zone cell, and points its camera at its parked
+    leader (the view a player would have after walking out).
+  - WATCH 30-60 s: the host points its camera at the joiner's leader
+    (`cameraFocusOn`, as if following the friend). The joiner stays inside.
+  - 1 Hz `SCENARIO INDOOR ROW` / `CAM` lines on both sides.
+- Oracle `Test-FriendIndoors` (probe tier): reports, per phase and side, which
+  building each character is inside and whether that interior is open. Verdict:
+  "Bug #16 REPRODUCED" when, in WATCH, the joiner's own log has its leader inside
+  building B while the host has B closed. Answers hypothesis 1 vs 2 from the
+  host's row for the joiner's copy. FAIL only when the setup didn't happen (no
+  rows, the host still inside after OUT, the joiner not inside in BASE, the
+  camera focus failed).
+
+### Step 2 - the fix (designed after step 1; you approve before any code)
+
+Candidates, smallest blast radius first:
+
+- **B. Rendering only.** Make each client also open the interior of a building
+  the peer's own client reports its characters inside. This touches only which
+  interiors this client draws, never a character's state, AI or pathing.
+  `updateFloorVisibility` is private and runs every frame, so the lever needs
+  care; step 1 tells us whether a copy's state is even wrong.
+- **C. Indoor state on copies.** Carry the owner's `isInsideBuilding` across and
+  apply it to the copy. More direct, but indoor state also feeds pathing,
+  trespass and NPC reactions, so it carries more risk.
+
+### Step 3 - scenario hygiene (test code only)
+
+melee_together's park also refocuses the host camera on its parked leader, so
+the test stops showing a view no player would have.
+
+## Safety checks for any step-2 fix
+
+This touches what the player sees, so before it ships:
+
+1. An off switch (`KENSHICOOP_PEER_INTERIORS=0`) restoring today's behaviour.
+2. An A/B gate built on `friend_indoors`: it FAILs if the host draws the bar
+   closed while the joiner is inside, and the off-switch arm must FAIL.
+3. Negative checks on both clients: your own characters entering and leaving a
+   building still open and close it exactly as before; a building with no
+   player characters stays closed; a peer standing outdoors changes nothing; no
+   camera movement in normal play (the fix never moves a camera).
+4. Regression: the smoke tier plus the scenarios that go through buildings and
+   doors (door, bed and rest, jail), on both builds, with no new faults in the
+   crash/fault counters.
+5. A line-by-line review of the diff before deploy, and a manual look in both
+   windows by Brandon.

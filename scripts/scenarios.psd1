@@ -2067,6 +2067,21 @@
             Tier = 'probe'; WanVariant = $false
         }
 
+        # friend_indoors: bug #16 probe (docs/design/bug16-host-black-interior.md).
+        # Both squads start in the bar; the host parks its tab 1500 u outside
+        # and follows the joiner's leader with its camera. Read-only rows say
+        # which building each body is inside and whether each client draws the
+        # bar's interior open. Gates only that the setup happened; the open
+        # rates and the H1/H2 verdict are findings. 64 s after arming.
+        friend_indoors = @{
+            Save = 'sync'; Setup = ''; Tolerance = 20.0
+            Seconds = 150; KillGraceSec = 120
+            PrimaryGate = 'friend_indoors'
+            Gating   = @('friend_indoors')
+            Advisory = @('smoothness', 'clock_sync')
+            Tier = 'probe'; WanVariant = $false
+        }
+
         # ---- inventory ---------------------------------------------------------------
         inv_snapshot_cursor = @{
             DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_XFER_SYNC = '1' }

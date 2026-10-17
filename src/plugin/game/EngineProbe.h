@@ -102,6 +102,29 @@ bool probeShopTown(GameWorld* gw, bool waystation, float outPosition[3]);
 bool probeTraderWindow(const unsigned int traderHand[5], unsigned int* outHash,
                        unsigned int* outQuantity, bool keepVisible = false);
 
+// ---- Bug #16 indoor-state probe (read-only) ---------------------------------
+// One row per player-faction character (own squad AND the peer's copies): which
+// building the engine thinks it is inside (RootObject::isInsideBuilding, a plain
+// field read), that building's draw state, and whether THIS client's
+// PlayerInterface currently draws its interior open (the engine's own
+// getInteriorsVisible query). Reads only; no setter is called. -1 = unresolved.
+struct IndoorRow {
+    unsigned int hand[5];     // the character: type, container, containerSerial, index, serial
+    unsigned int inside[5];   // isInsideBuilding (index=serial=0 -> outdoors)
+    int  bldResolved;         // 1 = inside[] resolved to a live BUILDING
+    int  bldVisible;          // Building::getVisible()
+    int  bldInterior;         // Building::interiorVisibility
+    int  interiorsOpen;       // PlayerInterface::getInteriorsVisible(building)
+    int  selected;            // 1 = PlayerInterface::selectedCharacter is this body
+    char name[48];
+};
+unsigned int probeIndoors(GameWorld* gw, IndoorRow* out, unsigned int maxOut);
+// The same three reads for one building by hand (type, container,
+// containerSerial, index, serial), whoever is or isn't inside it. Returns the
+// getInteriorsVisible answer (1/0), or -1 when the hand is not a live building.
+int probeInteriorOpen(GameWorld* gw, const unsigned int bHand[5],
+                      int* outVisible, int* outInterior);
+
 } // namespace engine
 } // namespace coop
 

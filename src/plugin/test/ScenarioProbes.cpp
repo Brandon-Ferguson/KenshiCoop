@@ -2673,10 +2673,215 @@ private:
 const float CellAuthTogetherScenario::IDLE_LEG = 15.0f;
 const float CellAuthTogetherScenario::EDGE_LEG = 60.0f;
 
+namespace {
+// friend_indoors (bug #16 probe, docs/design/bug16-host-black-interior.md): does
+// a client draw a building's interior open when only the OTHER player's
+// characters are inside it? Read-only measurement; nothing here changes indoor
+// state or interiors. Save 'sync' (both squads start in the bar).
+//   8-20 s   BASE  - both stay inside, each camera on its own leader. Each side
+//                    latches the building its own leader is inside (the bar).
+//   20 s     OUT   - the host parks its own tab OUT_DIST u along +x, outside
+//                    the bar but in the same town and zone cell.
+//   30-60 s  WATCH - the host points its camera at the JOINER's leader (as if
+//                    following the friend); the joiner stays inside.
+// 1 Hz on both sides: SCENARIO INDOOR ROW (every player-faction body: which
+// building it is inside and whether that interior is drawn open here), BAR (the
+// latched building's open/visible state, asked directly) and CAM.
+class FriendIndoorsScenario : public TimedScenario {
+public:
+    FriendIndoorsScenario()
+        : TimedScenario("friend_indoors", 0), haveOwn_(false), havePeer_(false),
+          haveBar_(false), parked_(false), nParked_(0), focusOk_(false),
+          ownFocused_(false), lastFocusMs_(0), lastSampleMs_(0), phase_(PH_SETUP) {}
+
+    virtual void onGameplay(const ScenarioContext& ctx) { latchLeaders(ctx); }
+    virtual void onStart(const ScenarioContext& ctx) { latchLeaders(ctx); }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!haveOwn_ || !havePeer_) latchLeaders(ctx);
+
+        int want = PH_SETUP;
+        if (ctx.elapsedMs >= BASE_AT_MS && ctx.elapsedMs < OUT_AT_MS) want = PH_BASE;
+        else if (ctx.elapsedMs >= OUT_AT_MS && ctx.elapsedMs < WATCH_AT_MS) want = PH_OUT;
+        else if (ctx.elapsedMs >= WATCH_AT_MS && ctx.elapsedMs < WATCH_END_MS) want = PH_WATCH;
+        else if (ctx.elapsedMs >= WATCH_END_MS) want = PH_DONE;
+        if (want != phase_) {
+            if (phase_ >= PH_BASE && phase_ <= PH_WATCH) logPhase(ctx, phase_, "end");
+            phase_ = want;
+            if (phase_ >= PH_BASE && phase_ <= PH_WATCH) logPhase(ctx, phase_, "begin");
+        }
+
+        // BASE: each camera on its own leader (the control view).
+        if (phase_ == PH_BASE && !ownFocused_ && haveOwn_) {
+            Character* oc = engine::resolveCharByHand(ownHand_[3], ownHand_[4],
+                                                      ownHand_[0], ownHand_[1], ownHand_[2]);
+            ownFocused_ = oc && engine::cameraFocusOn(ctx.gw, oc);
+            logFocus(ctx, "own", ownFocused_);
+        }
+        // OUT: the host leaves the bar (body only; the camera follows its leader).
+        if (ctx.isHost && phase_ == PH_OUT && !parked_) parkOwnTabOut(ctx);
+        // WATCH: the host follows the joiner's leader; re-assert every 10 s in
+        // case anything re-selected (idempotent).
+        if (ctx.isHost && phase_ == PH_WATCH && havePeer_ &&
+            (lastFocusMs_ == 0 || ctx.elapsedMs - lastFocusMs_ >= 10000)) {
+            lastFocusMs_ = ctx.elapsedMs;
+            Character* pc = engine::resolveCharByHand(peerHand_[3], peerHand_[4],
+                                                      peerHand_[0], peerHand_[1], peerHand_[2]);
+            bool ok = pc && engine::cameraFocusOn(ctx.gw, pc);
+            if (ok) focusOk_ = true;
+            logFocus(ctx, "peer", ok);
+        }
+
+        if (phase_ >= PH_BASE && phase_ <= PH_WATCH &&
+            ctx.elapsedMs - lastSampleMs_ >= 1000) {
+            lastSampleMs_ = ctx.elapsedMs;
+            sample(ctx);
+        }
+
+        unsigned long dur = ctx.isHost ? HOST_DURATION_MS : JOIN_DURATION_MS;
+        if (ctx.elapsedMs >= dur) {
+            passed_ = ctx.isHost ? (haveBar_ && parked_ && nParked_ > 0 && focusOk_)
+                                 : (haveBar_ && haveOwn_ && havePeer_);
+            char b[160]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO INDOOR RESULT who=%s bar=%d parked=%u focus=%d",
+                ctx.isHost ? "host" : "join", haveBar_ ? 1 : 0, nParked_, focusOk_ ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    enum { PH_SETUP, PH_BASE, PH_OUT, PH_WATCH, PH_DONE };
+    static const char* phaseName(int p) {
+        switch (p) {
+            case PH_BASE:  return "base";
+            case PH_OUT:   return "out";
+            case PH_WATCH: return "watch";
+            case PH_DONE:  return "done";
+            default:       return "setup";
+        }
+    }
+
+    void logPhase(const ScenarioContext& ctx, int p, const char* state) {
+        char b[128]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO INDOOR PHASE name=%s state=%s who=%s t=%lu", phaseName(p), state,
+            ctx.isHost ? "host" : "join", ctx.elapsedMs);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    void logFocus(const ScenarioContext& ctx, const char* on, bool ok) {
+        char b[128]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO INDOOR FOCUS who=%s on=%s ok=%d t=%lu",
+            ctx.isHost ? "host" : "join", on, ok ? 1 : 0, ctx.elapsedMs);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    void sample(const ScenarioContext& ctx) {
+        const char* who = ctx.isHost ? "host" : "join";
+        engine::IndoorRow rows[MAX_ROWS];
+        unsigned int n = engine::probeIndoors(ctx.gw, rows, MAX_ROWS);
+        for (unsigned int i = 0; i < n; ++i) {
+            const engine::IndoorRow& r = rows[i];
+            bool own  = r.hand[3] == ownHand_[3] && r.hand[4] == ownHand_[4];
+            bool peer = r.hand[3] == peerHand_[3] && r.hand[4] == peerHand_[4];
+            // BASE: latch the building our own leader stands in (the bar).
+            if (!haveBar_ && phase_ == PH_BASE && own && r.bldResolved) {
+                for (int k = 0; k < 5; ++k) bar_[k] = r.inside[k];
+                haveBar_ = true;
+            }
+            char b[300]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO INDOOR ROW who=%s phase=%s lead=%s name='%s' hand=%u,%u "
+                "inside=%u.%u.%u.%u.%u res=%d vis=%d int=%d open=%d sel=%d t=%lu",
+                who, phaseName(phase_), own ? "own" : (peer ? "peer" : "other"), r.name,
+                r.hand[3], r.hand[4], r.inside[0], r.inside[1], r.inside[2], r.inside[3],
+                r.inside[4], r.bldResolved, r.bldVisible, r.bldInterior, r.interiorsOpen,
+                r.selected, ctx.elapsedMs);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        if (haveBar_) {
+            int vis = -1, inr = -1;
+            int open = engine::probeInteriorOpen(ctx.gw, bar_, &vis, &inr);
+            char b[200]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO INDOOR BAR who=%s phase=%s bar=%u.%u.%u.%u.%u open=%d vis=%d int=%d t=%lu",
+                who, phaseName(phase_), bar_[0], bar_[1], bar_[2], bar_[3], bar_[4],
+                open, vis, inr, ctx.elapsedMs);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        float c[3];
+        if (engine::cameraCenter(ctx.gw, c)) {
+            char b[160]; _snprintf(b, sizeof(b) - 1,
+                "SCENARIO INDOOR CAM who=%s phase=%s center=%.0f,%.0f,%.0f t=%lu",
+                who, phaseName(phase_), c[0], c[1], c[2], ctx.elapsedMs);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+
+    // HOST: move the whole own tab OUT_DIST u along +x, on the terrain, then
+    // keep the camera on the parked leader (park() never moves the camera).
+    void parkOwnTabOut(const ScenarioContext& ctx) {
+        parked_ = true;
+        EntityState sq[MAX_SQUAD];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_SQUAD);
+        int idx = tabLeaderIdx(sq, n, 0);
+        if (idx < 0) { coop::logLine("SCENARIO INDOOR PARK FAILED (no own leader)"); return; }
+        float tx = sq[idx].x + OUT_DIST, tz = sq[idx].z, ty = sq[idx].y;
+        bool ground = engine::terrainHeightAt(tx, tz, &ty);
+        unsigned int k = 0;
+        Character* lead = 0;
+        for (unsigned int i = 0; i < n; ++i) {
+            if (!tabCtnrEq(sq[i], sq[idx])) continue;
+            Character* c = engine::resolve(sq[i]);
+            if (c && engine::park(c, tx + (float)k * 3.0f, ty, tz, 0.0f)) {
+                ++nParked_;
+                if (!lead) lead = c;
+            }
+            ++k;
+        }
+        if (lead) engine::cameraFocusOn(ctx.gw, lead);
+        char b[160]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO INDOOR PARK members=%u parked=%u at=%.0f,%.0f,%.0f ground=%d",
+            k, nParked_, tx, ty, tz, ground ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    void latchLeaders(const ScenarioContext& ctx) {
+        const unsigned int ownRank = ctx.isHost ? 0u : 1u;
+        EntityState sq[MAX_SQUAD];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_SQUAD);
+        int io = tabLeaderIdx(sq, n, ownRank);
+        int ip = tabLeaderIdx(sq, n, ownRank == 0u ? 1u : 0u);
+        if (!haveOwn_ && io >= 0) { handFromEntity(sq[io], ownHand_); haveOwn_ = true; }
+        if (!havePeer_ && ip >= 0) { handFromEntity(sq[ip], peerHand_); havePeer_ = true; }
+    }
+
+    static const unsigned long BASE_AT_MS       = 8000;
+    static const unsigned long OUT_AT_MS        = 20000;
+    static const unsigned long WATCH_AT_MS      = 30000;
+    static const unsigned long WATCH_END_MS     = 60000;
+    static const unsigned long JOIN_DURATION_MS = 62000;
+    static const unsigned long HOST_DURATION_MS = 64000;
+    static const unsigned int  MAX_SQUAD        = 32;
+    static const unsigned int  MAX_ROWS         = 16;
+    static const float         OUT_DIST;
+
+    bool          haveOwn_, havePeer_, haveBar_, parked_;
+    unsigned int  nParked_;
+    bool          focusOk_, ownFocused_;
+    unsigned long lastFocusMs_, lastSampleMs_;
+    int           phase_;
+    unsigned int  ownHand_[5], peerHand_[5], bar_[5];
+};
+// Outside the bar's walls, well inside the 4608 u zone cell and the 2000 u
+// census sphere, so the host still loads and streams the bar.
+const float FriendIndoorsScenario::OUT_DIST = 1500.0f;
+} // namespace
+
 Scenario* makeProbeScenario(const std::string& name) {
     if (name == "spike")        return new SpikeScenario();
     if (name == "cell_probe")   return new CellProbeScenario();
     if (name == "cell_auth_together") return new CellAuthTogetherScenario();
+    if (name == "friend_indoors") return new FriendIndoorsScenario();
     if (name == "shop_probe")   return new ShopProbeScenario();
     if (name == "wallet_probe") return new MoneyPoolScenario(/*probe=*/true);
     if (name == "money_sync")   return new MoneyPoolScenario(/*probe=*/false);

@@ -688,5 +688,115 @@ int probeNativeSnapshot(GameWorld* gw) {
            loadedRecordCount == recordCount ? 1 : 0;
 }
 
+// ---- Bug #16 indoor-state probe (read-only) ---------------------------------
+namespace {
+typedef bool (__fastcall* InteriorsVisibleFn)(PlayerInterface* self, Building* b);
+InteriorsVisibleFn g_interiorsVisibleFn = 0;
+bool               g_interiorsVisibleTried = false;
+
+void indoorHandArr(const hand& h, unsigned int out[5]) {
+    out[0] = (unsigned int)h.type; out[1] = h.container; out[2] = h.containerSerial;
+    out[3] = h.index; out[4] = h.serial;
+}
+
+bool indoorHandEq(const hand& a, const hand& b) {
+    return a.type == b.type && a.container == b.container &&
+           a.containerSerial == b.containerSerial && a.index == b.index &&
+           a.serial == b.serial;
+}
+
+// One row in its own SEH frame, so a body that faults costs only its row. No
+// C++ objects with destructors in here (C2712).
+bool fillIndoorRow(PlayerInterface* pl, Character* c, IndoorRow* r) {
+    __try {
+        memset(r, 0, sizeof(*r));
+        r->bldVisible = r->bldInterior = r->interiorsOpen = -1;
+        indoorHandArr(c->handle, r->hand);
+        const hand& in = c->isInsideBuilding;
+        indoorHandArr(in, r->inside);
+        r->selected = indoorHandEq(pl->selectedCharacter, c->handle) ? 1 : 0;
+        if ((in.index != 0 || in.serial != 0) && in.type == BUILDING && g_handGetRootFn) {
+            RootObject* ro = g_handGetRootFn(&in);
+            if (ro) {
+                Building* b = static_cast<Building*>(ro);
+                r->bldResolved = 1;
+                r->bldVisible  = b->getVisible() ? 1 : 0;
+                r->bldInterior = b->interiorVisibility ? 1 : 0;
+                if (g_interiorsVisibleFn)
+                    r->interiorsOpen = g_interiorsVisibleFn(pl, b) ? 1 : 0;
+            }
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+unsigned int listIndoorChars(GameWorld* gw, PlayerInterface** outPl,
+                             Character** out, unsigned int maxOut) {
+    __try {
+        PlayerInterface* pl = gw->player;
+        if (!pl) return 0;
+        *outPl = pl;
+        unsigned int n = 0, size = (unsigned int)pl->playerCharacters.size();
+        for (unsigned int i = 0; i < size && n < maxOut; ++i)
+            if (pl->playerCharacters[i]) out[n++] = pl->playerCharacters[i];
+        return n;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+void resolveInteriorsVisible() {
+    if (g_interiorsVisibleTried) return;
+    g_interiorsVisibleTried = true;
+    g_interiorsVisibleFn = (InteriorsVisibleFn)KenshiLib::GetRealAddress(
+        &PlayerInterface::getInteriorsVisible);
+}
+
+int interiorOpenSeh(GameWorld* gw, RootObject* ro, int* outVisible, int* outInterior) {
+    __try {
+        PlayerInterface* pl = gw->player;
+        if (!pl) return -1;
+        Building* b = static_cast<Building*>(ro);
+        *outVisible  = b->getVisible() ? 1 : 0;
+        *outInterior = b->interiorVisibility ? 1 : 0;
+        return g_interiorsVisibleFn ? (g_interiorsVisibleFn(pl, b) ? 1 : 0) : -1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+} // namespace
+
+int probeInteriorOpen(GameWorld* gw, const unsigned int bHand[5],
+                      int* outVisible, int* outInterior) {
+    int vis = -1, inr = -1;
+    int open = -1;
+    if (gw && bHand && bHand[0] == (unsigned int)BUILDING &&
+        (bHand[3] != 0 || bHand[4] != 0)) {
+        resolveInteriorsVisible();
+        RootObject* ro = resolveObjectByHand(bHand);
+        if (ro) open = interiorOpenSeh(gw, ro, &vis, &inr);
+    }
+    if (outVisible)  *outVisible = vis;
+    if (outInterior) *outInterior = inr;
+    return open;
+}
+
+unsigned int probeIndoors(GameWorld* gw, IndoorRow* out, unsigned int maxOut) {
+    if (!gw || !out || maxOut == 0) return 0;
+    resolveInteriorsVisible();
+    Character* chars[64];
+    PlayerInterface* pl = 0;
+    unsigned int nc = listIndoorChars(gw, &pl, chars, maxOut < 64 ? maxOut : 64);
+    unsigned int n = 0;
+    for (unsigned int i = 0; i < nc; ++i) {
+        if (!fillIndoorRow(pl, chars[i], &out[n])) continue;
+        charName(chars[i], out[n].name, sizeof(out[n].name));
+        ++n;
+    }
+    return n;
+}
+
 } // namespace engine
 } // namespace coop
