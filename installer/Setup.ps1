@@ -35,7 +35,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$SetupVersion   = '0.1.32'
+$SetupVersion   = '0.1.33'
 # kenshi_x64.exe fingerprints (SHA-256), cross-checked against the MD5 list in
 # RE_Kenshi 0.3.5's config.json ("Steam 1.0.68" 8a03c256..., "Steam 1.0.65" df4a5a7e...).
 # Steam now ships 1.0.68. The mod and RE_Kenshi run on 1.0.65, so for 1.0.68
