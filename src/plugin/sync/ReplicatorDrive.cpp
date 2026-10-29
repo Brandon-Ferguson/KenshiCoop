@@ -1241,7 +1241,80 @@ void Replicator::applyTargets(GameWorld* gw) {
         // graded bands (leave / walk-converge / logged teleport). Combatants skip the
         // AI-suspend path below (their AI must run to animate), reached only via this
         // early `continue`.
-        if (coop::taskIsCombat(out.task)) {
+        // ---- Stuck-attacker mirror (hostile-squad desync, 2026-10-17) ----------
+        // The owner streams a combat intent whenever its body reads engaged with
+        // a target - including a body that holds a target it cannot reach and
+        // never moves (mint_aggro: enemy 4 sat at its park spot for 16 s with
+        // its task flickering melee/idle while the host showed no fight). Our
+        // copy CAN move, so replaying that intent sent it charging into a fight
+        // only this screen saw (nhoral#34/#54). Mirror the owner instead: no
+        // order, no pursuit, AI-suspended on the ordinary drive, until the
+        // owner's body is within reach of its target or moving. Exempt: player
+        // characters (player-authored orders), WAIT stances (ring, no charge),
+        // ranged copies (a crossbow legitimately stands off), and a target we
+        // cannot read (no evidence - keep today's behaviour).
+        bool combatMirror = false;
+        // Displacement of the STREAMED pose, tracked for every driven NPC so a
+        // body already charging when its combat intent arrives counts as
+        // moving. Horizontal only: a lurch on a slope moves y without going
+        // anywhere (141424 enemy 3: +7 u in y on a 7.6 u step).
+        if (stuckMirror_ && !isSquad) {
+            float mdx = out.x - d.combatAnchorX, mdz = out.z - d.combatAnchorZ;
+            bool travelled = d.combatAnchorMs != 0 &&
+                (mdx * mdx + mdz * mdz) >= COMBAT_MIRROR_MOVE_DIST * COMBAT_MIRROR_MOVE_DIST;
+            if (travelled) d.combatMoveMs = now;
+            if (travelled || d.combatAnchorMs == 0 ||
+                (now - d.combatAnchorMs) >= COMBAT_MIRROR_WINDOW_MS) {
+                d.combatAnchorX = out.x; d.combatAnchorZ = out.z;
+                d.combatAnchorMs = now;
+            }
+        }
+        if (stuckMirror_ && !isSquad && coop::taskIsCombat(out.task) &&
+            !coop::taskIsCombatWait(out.task)) {
+            bool moving = d.combatMoveMs != 0 &&
+                          (now - d.combatMoveMs) < COMBAT_MIRROR_MOVE_HOLD_MS;
+            float reach = -1.0f;
+            if (!moving) {
+                Key tk; tk.t = out.sType; tk.c = out.sContainer;
+                tk.cs = out.sContainerSerial; tk.i = out.sIndex; tk.s = out.sSerial;
+                Character* tc = resolveEventChar(tk);
+                float tx = 0.0f, ty = 0.0f, tz = 0.0f;
+                if (tc && engine::readPos(tc, &tx, &ty, &tz))
+                    reach = dist3(out.x, out.y, out.z, tx, ty, tz);
+            }
+            if (!moving && reach > COMBAT_MIRROR_REACH) {
+                engine::CombatRead rc;
+                bool ranged = engine::readCombat(c, &rc) && rc.ranged;
+                combatMirror = !ranged;
+            }
+            if (combatMirror && d.combatMirrorSince == 0) {
+                d.combatMirrorSince = now;
+                char b[192]; _snprintf(b, sizeof(b) - 1,
+                    "[combat] mirror START hand=%u,%u tgt=%u,%u reach=%.0f armed=%d",
+                    out.hIndex, out.hSerial, out.sIndex, out.sSerial, reach,
+                    d.combatArmed ? 1 : 0);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            // From here on the body is driven as what its owner visibly is: a
+            // body standing at rest. The synthetic combat task must not reach
+            // applyRest, which would try to inject it as a pose (and detach
+            // the body from town AI) - before the mirror, every combat tick
+            // left through the combat branch, so it never saw one.
+            if (combatMirror) {
+                out.task = TASK_NONE;
+                out.sType = 0; out.sContainer = 0; out.sContainerSerial = 0;
+                out.sIndex = 0; out.sSerial = 0;
+            }
+        }
+        if (!combatMirror && d.combatMirrorSince != 0) {
+            char b[160]; _snprintf(b, sizeof(b) - 1,
+                "[combat] mirror END hand=%u,%u after=%lums why=%s",
+                out.hIndex, out.hSerial, now - d.combatMirrorSince,
+                !coop::taskIsCombat(out.task) ? "peace" : "engage");
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            d.combatMirrorSince = 0;
+        }
+        if (coop::taskIsCombat(out.task) && !combatMirror) {
             // The streamed SUBJECT is the target's hand in the PEER's key space.
             // A body this client minted as a proxy lives under a different local
             // hand (that is what the [rekey] line records), so applyCombat's raw
@@ -1283,6 +1356,18 @@ void Replicator::applyTargets(GameWorld* gw) {
                 }
             }
             bool hostWaiting = coop::taskIsCombatWait(out.task);
+            // Episode probe bookkeeping (read-only): measured before
+            // combatSeenTick moves, so the gap is the one since the last
+            // combat-streamed tick of this episode.
+            if (!d.combatArmed || d.combatEpStart == 0) { // new episode (the order below arms it)
+                d.combatEpStart = now;
+                d.combatEpMaxGap = 0; d.combatEpTicks = 0; d.combatEpFought = 0;
+                d.combatEpHold = 0; d.combatEpHoldFought = 0;
+            } else if (d.combatSeenTick != 0 &&
+                       (now - d.combatSeenTick) > d.combatEpMaxGap) {
+                d.combatEpMaxGap = now - d.combatSeenTick;
+            }
+            ++d.combatEpTicks;
             d.combatSeenTick = now; // feeds the disarm debounce below
             // Do NOT separateIntoMyOwnSquad here. Re-containering the body
             // breaks the streamed hand: resolve() misses, a proxy mints on
@@ -1295,6 +1380,7 @@ void Replicator::applyTargets(GameWorld* gw) {
             // between combo sections and slot rotations (the crowd lesson).
             bool localFighting = engine::readCombat(c, &lc) &&
                                  (lc.inCombat || lc.modeActive);
+            if (localFighting) ++d.combatEpFought;
             // The copy is engaged with the WRONG body (the local brawl grabbed it).
             bool wrongLocalTgt = localFighting && lc.hasTarget &&
                 (lc.target[3] != out.sIndex || lc.target[4] != out.sSerial);
@@ -1387,6 +1473,35 @@ void Replicator::applyTargets(GameWorld* gw) {
                     (fr == 2 ? " forced=1" : (fr == 1 ? " forced=notgt" :
                      (fr == 0 ? " forced=nofn" : " forced=fault"))));
                   b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
+                // Read-only reach probe (hostile-squad desync, 2026-10-17): how
+                // far the OWNER's attacker stands from its target, and whether it
+                // is closing, at the moment we replay its intent. mint_aggro's
+                // phantom fights replay intents from bodies ~440 u out and
+                // standing still; this sizes a reach gate against real fights.
+                // reach    = streamed attacker pose -> target's local pose
+                // copyReach = our copy -> target's local pose
+                // -1 = the target (or our copy) could not be read here.
+                {
+                    float reach = -1.0f, copyReach = -1.0f, srcV = 0.0f;
+                    Character* tc = engine::resolveCharByHand(
+                        out.sIndex, out.sSerial, out.sType,
+                        out.sContainer, out.sContainerSerial);
+                    float tx = 0.0f, ty = 0.0f, tz = 0.0f;
+                    if (tc && engine::readPos(tc, &tx, &ty, &tz)) {
+                        reach = dist3(out.x, out.y, out.z, tx, ty, tz);
+                        if (haveActual) copyReach = dist3(ax, ay, az, tx, ty, tz);
+                    }
+                    EntityState nn; float vx = 0.0f, vy = 0.0f, vz = 0.0f;
+                    if (d.interp.latest(&nn, &vx, &vy, &vz))
+                        srcV = std::sqrt(vx * vx + vy * vy + vz * vz);
+                    char rb[192]; _snprintf(rb, sizeof(rb) - 1,
+                        "[combat] reach hand=%u,%u tgt=%u,%u reach=%.0f copyReach=%.0f "
+                        "srcVel=%.1f wait=%d isSquad=%d n=%u",
+                        out.hIndex, out.hSerial, out.sIndex, out.sSerial,
+                        reach, copyReach, srcV, hostWaiting ? 1 : 0,
+                        isSquad ? 1 : 0, d.combatOrders);
+                    rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
+                }
             }
             // Graded position correction (don't kill the gait): under the soft band
             // the fight owns the footwork; drifted past it, a WAITING copy converges
@@ -1546,8 +1661,26 @@ void Replicator::applyTargets(GameWorld* gw) {
         if (d.combatArmed) {
             float heldDrift = haveActual
                 ? dist3(ax, ay, az, out.x, out.y, out.z) : 0.0f;
-            if ((now - d.combatSeenTick) < COMBAT_DISARM_MS &&
+            // A mirrored body disarms NOW: the hold's live AI is exactly what
+            // let the copy keep fighting a target its owner never reached.
+            // And the hold is capped by the episode's own age (NPC copies,
+            // same switch): it bridges lossy-batch gaps in a fight the owner
+            // is having, and a 32 ms owner blip is not one - run 141424 bought
+            // 4 s of join-only fighting off exactly that.
+            unsigned long holdMs = COMBAT_DISARM_MS;
+            if (stuckMirror_ && !isSquad && d.combatEpStart != 0) {
+                unsigned long age = (d.combatSeenTick >= d.combatEpStart)
+                    ? d.combatSeenTick - d.combatEpStart : 0;
+                holdMs = age > COMBAT_HOLD_MIN_MS ? age : COMBAT_HOLD_MIN_MS;
+                if (holdMs > COMBAT_DISARM_MS) holdMs = COMBAT_DISARM_MS;
+            }
+            if (!combatMirror &&
+                (now - d.combatSeenTick) < holdMs &&
                 heldDrift <= combatBigSnapDist_) {
+                ++d.combatEpHold;
+                { engine::CombatRead hc;
+                  if (engine::readCombat(c, &hc) && (hc.inCombat || hc.modeActive))
+                      ++d.combatEpHoldFought; }
                 if (isSquad) {
                     engine::applyRaw(c, out);
                     engine::applyMotion(c, true, out.cSpeed,
@@ -1563,6 +1696,27 @@ void Replicator::applyTargets(GameWorld* gw) {
                     "[combat] hold BREAK hand=%u,%u drift=%.1f gap=%lums",
                     out.hIndex, out.hSerial, heldDrift, now - d.combatSeenTick);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            // Episode probe (read-only): how long the OWNER streamed combat
+            // for this body versus how long our copy fought for it. dur =
+            // first to last combat-streamed tick; maxGap = longest silence
+            // inside it; fought/hold = engaged ticks while streamed / while
+            // held after the stream stopped. A host blip that our order turns
+            // into a committed fight shows as short dur, long hold-fought.
+            if (d.combatEpStart != 0) {
+                unsigned long dur = (d.combatSeenTick >= d.combatEpStart)
+                    ? d.combatSeenTick - d.combatEpStart : 0;
+                char eb[224]; _snprintf(eb, sizeof(eb) - 1,
+                    "[combat] episode hand=%u,%u isSquad=%d dur=%lums maxGap=%lums "
+                    "ticks=%u fought=%u hold=%u holdFought=%u orders=%u why=%s",
+                    out.hIndex, out.hSerial, isSquad ? 1 : 0, dur, d.combatEpMaxGap,
+                    d.combatEpTicks, d.combatEpFought, d.combatEpHold,
+                    d.combatEpHoldFought, d.combatOrders,
+                    combatMirror ? "mirror" :
+                    (heldDrift > combatBigSnapDist_ ? "break" :
+                     (holdMs < COMBAT_DISARM_MS ? "cap" : "timeout")));
+                eb[sizeof(eb) - 1] = '\0'; coop::logLine(eb);
+                d.combatEpStart = 0;
             }
             d.combatArmed = false;
             d.combatOrders = 0;
@@ -1740,16 +1894,22 @@ void Replicator::applyTargets(GameWorld* gw) {
             // same tick. Bodies in host-reported combat/down never reach here
             // (their branches continue earlier), so trust only governs the
             // locomotion/rest regime.
+            // The one exception is a combat-MIRRORED body (stuck-attacker mirror):
+            // its owner streams combat, but it takes the ordinary drive. It must
+            // never be trusted - trust hands it back to its own AI, which is the
+            // join-only fight the mirror exists to stop - so it counts as
+            // disagreeing: streak reset, and any standing trust revoked.
+            bool trustAgree = agree && !combatMirror;
             if (gateAuthority_) {
                 float drift = haveActual ? dist3(ax, ay, az, out.x, out.y, out.z) : 1e9f;
                 bool inPos = (drift <= TRUST_DRIFT_MAX);
-                if (agree && inPos) {
+                if (trustAgree && inPos) {
                     if (d.agreeStreak < 1000000u) ++d.agreeStreak;
                 } else {
                     d.agreeStreak = 0;
                 }
                 if (d.trusted) {
-                    if (agree && inPos) {
+                    if (trustAgree && inPos) {
                         // Stay trusted: no suspend (set not re-added), no drive.
                         if (haveActual) { d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az; }
                         continue;
@@ -1760,7 +1920,8 @@ void Replicator::applyTargets(GameWorld* gw) {
                     d.taskApplied = false; d.taskBad = false; d.goalsCleared = false;
                     { char b[128]; _snprintf(b, sizeof(b) - 1,
                         "[trust] revoke hand=%u,%u reason=%s drift=%.1f",
-                        out.hIndex, out.hSerial, agree ? "drift" : "task", drift);
+                        out.hIndex, out.hSerial,
+                        combatMirror ? "mirror" : (agree ? "drift" : "task"), drift);
                       b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
                     // fall through: the normal drive re-engages below this tick
                 } else if (d.agreeStreak >= TRUST_STREAK_FRAMES) {
@@ -2015,7 +2176,9 @@ void Replicator::applyTargets(GameWorld* gw) {
         // trailed farther). Movers stay driven - the anti-zombie fix - and
         // the release also skips the AI suspend below, so the local AI can
         // idle the body naturally between host movements.
-            if (!isSquad && midTier && !npcMoving) {
+        // A combat-MIRRORED body is never released: its owner says it wants a
+        // fight, and its local AI would start one (stuck-attacker mirror).
+            if (!isSquad && midTier && !npcMoving && !combatMirror) {
                 drivenChars_.erase(c);
                 drivenSeen_.erase(c); // wide pass may census-park it again
                 d.parked = false; d.haveDest = false;

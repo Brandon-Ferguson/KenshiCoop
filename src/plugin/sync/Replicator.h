@@ -153,6 +153,12 @@ public:
     // native on each machine's local pair. KENSHICOOP_CARRY_SYNC=0 disables.
     void setCarrySync(bool v) { carrySync_ = v; }
 
+    // Stuck-attacker mirror (hostile-squad desync, default ON): a driven world-
+    // NPC copy is not ordered after a target its owner's body is neither within
+    // 60 u of nor moving toward (ranged and waiting stances excepted). It holds
+    // where its owner has it, AI-suspended. KENSHICOOP_COMBAT_STUCK_MIRROR=0.
+    void setCombatStuckMirror(bool v) { stuckMirror_ = v; }
+
     // Peer-left sweep (carried-body sync): any driven (peer-owned) copy still
     // carrying a body after its owner disconnected gets a local drop, then the
     // passenger is parked and restoreMovement()'d so Havok is not left dead
@@ -927,6 +933,26 @@ private:
         u32          combatTgtSer;    //   so a host-side retarget re-issues immediately
         unsigned long combatSeenTick; // last tick the host stream reported combat (the
                                       //   disarm DEBOUNCE: a 1-batch gap must not reset the AI)
+        // Read-only episode probe (hostile-squad desync, 2026-10-17): one host
+        // combat episode as this client RECEIVES it, first combat sample to
+        // disarm. Logged once as "[combat] episode" when the episode disarms.
+        unsigned long combatEpStart;  // first streamed combat sample of the episode (0 = none)
+        unsigned long combatEpMaxGap; // longest gap between two combat-streamed ticks in it (ms)
+        unsigned int  combatEpTicks;  // drive ticks that saw a streamed combat task
+        unsigned int  combatEpFought; //   ...of those, ticks the local copy read engaged
+        unsigned int  combatEpHold;   // hold ticks (stream no longer combat, not yet disarmed)
+        unsigned int  combatEpHoldFought; // ...of those, ticks the local copy read engaged
+        // Stuck-attacker mirror (KENSHICOOP_COMBAT_STUCK_MIRROR). The anchor is
+        // the streamed pose at the start of the current displacement window;
+        // combatMoveMs is the last tick the streamed body had travelled
+        // COMBAT_MIRROR_MOVE_DIST from it inside one window (tracked for every
+        // driven NPC, so a body already charging when combat starts counts);
+        // combatMirrorSince is when the current mirror started (0 = not
+        // mirroring), for the once-per-episode START/END log pair.
+        float         combatAnchorX, combatAnchorZ;
+        unsigned long combatAnchorMs;
+        unsigned long combatMoveMs;
+        unsigned long combatMirrorSince;
         unsigned long combatSnapTick; // last hard snap (cooldown; a failed teleport must not
                                       //   re-fire every frame - walk-converge between snaps)
         unsigned long combatSnapCount;// cumulative combat hard-snaps on this hand (Phase 1 warp
@@ -1038,7 +1064,12 @@ private:
                    koLatched(false), deathLatched(false), carriedDown(false),
                    combatArmed(false), combatTick(0), combatOrders(0),
                    combatTgtIdx(0), combatTgtSer(0),
-                   combatSeenTick(0), combatSnapTick(0), combatSnapCount(0),
+                   combatSeenTick(0),
+                   combatEpStart(0), combatEpMaxGap(0), combatEpTicks(0), combatEpFought(0),
+                   combatEpHold(0), combatEpHoldFought(0),
+                   combatAnchorX(0.0f), combatAnchorZ(0.0f), combatAnchorMs(0),
+                   combatMoveMs(0), combatMirrorSince(0),
+                   combatSnapTick(0), combatSnapCount(0),
                    combatOverTick(0), npcSnapTick(0), hadCarry(false),
                    goalsCleared(false),
                    trusted(false), agreeStreak(0),
@@ -1939,6 +1970,8 @@ private:
     bool                 reportOwnerFilter_;
     std::map<Key, PendingHit> pendingHits_;
     unsigned int         nextHitId_;
+    // Stuck-attacker mirror master enable (KENSHICOOP_COMBAT_STUCK_MIRROR).
+    bool                 stuckMirror_;
 
     // Carried-body sync (protocol 18): master enable (KENSHICOOP_CARRY_SYNC).
     bool                 carrySync_;

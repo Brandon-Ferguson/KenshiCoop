@@ -746,10 +746,13 @@
         # in both directions with no code change - whereas the distance between
         # a proxy and the body it stands for either stays bounded or does not.
         # Parity stays on as a finding because it is what the player SEES.
+        # one_sided_fight (2026-10-17) gates what parity cannot: a STREAK of
+        # one-second samples with the body fighting on one screen only. A streak
+        # is not a sampling race; Phase 1 measured 4-5 in both cell-auth arms.
         mint_aggro = @{
             Save = 'sync'; Setup = ''; Tolerance = 18.0
             PrimaryGate = 'proxy_drift'
-            Gating   = @('proxy_drift', 'clock_sync')
+            Gating   = @('proxy_drift', 'one_sided_fight', 'clock_sync')
             Advisory = @('mint_aggro', 'smoothness', 'anim_truth', 'march', 'combat_snap_rate', 'lifecycle', 'mint_dist')
             Tier = 'full'; WanVariant = $false
         }

@@ -220,6 +220,11 @@ struct Config {
     // peer's own swings, which had already landed natively on the author - and
     // the author applied them a second time. "0" restores that for the A/B.
     bool          hitOwnerFilter;   // KENSHICOOP_HIT_OWNER_FILTER     (on)
+    // Stuck-attacker mirror (hostile-squad desync, DEFAULT ON): a driven world-
+    // NPC copy is not sent after a combat target its owner's body is neither
+    // near (60 u) nor moving toward - it holds where its owner has it instead
+    // of running a fight only this screen sees. "0" restores the old replay.
+    bool          combatStuckMirror; // KENSHICOOP_COMBAT_STUCK_MIRROR (on)
 
     // Peer-ready scenario arming (KENSHICOOP_ARM_TIMEOUT_MS). A scenario's clock
     // (onStart + elapsedMs) does not begin at gameplay start; it begins when this

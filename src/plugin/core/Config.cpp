@@ -210,6 +210,7 @@ void loadConfig(Config& c) {
     c.noDetach  = envOr("KENSHICOOP_NO_DETACH", "") == "1";
     c.damageGuard = envOr("KENSHICOOP_DAMAGE_GUARD", "1") != "0";
     c.hitOwnerFilter = envOr("KENSHICOOP_HIT_OWNER_FILTER", "1") != "0";
+    c.combatStuckMirror = envOr("KENSHICOOP_COMBAT_STUCK_MIRROR", "1") != "0";
     // Divergence-gated authority promoted to DEFAULT ON (step-4 A/B, 2026-07-05:
     // trusted-set engaged in 4/4 runs - grants 5-8, trusted ~5 of 12 driven - with
     // npc_track/pose gates at parity; the single red run was a host crash that
