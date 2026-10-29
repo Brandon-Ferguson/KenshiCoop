@@ -1894,16 +1894,22 @@ void Replicator::applyTargets(GameWorld* gw) {
             // same tick. Bodies in host-reported combat/down never reach here
             // (their branches continue earlier), so trust only governs the
             // locomotion/rest regime.
+            // The one exception is a combat-MIRRORED body (stuck-attacker mirror):
+            // its owner streams combat, but it takes the ordinary drive. It must
+            // never be trusted - trust hands it back to its own AI, which is the
+            // join-only fight the mirror exists to stop - so it counts as
+            // disagreeing: streak reset, and any standing trust revoked.
+            bool trustAgree = agree && !combatMirror;
             if (gateAuthority_) {
                 float drift = haveActual ? dist3(ax, ay, az, out.x, out.y, out.z) : 1e9f;
                 bool inPos = (drift <= TRUST_DRIFT_MAX);
-                if (agree && inPos) {
+                if (trustAgree && inPos) {
                     if (d.agreeStreak < 1000000u) ++d.agreeStreak;
                 } else {
                     d.agreeStreak = 0;
                 }
                 if (d.trusted) {
-                    if (agree && inPos) {
+                    if (trustAgree && inPos) {
                         // Stay trusted: no suspend (set not re-added), no drive.
                         if (haveActual) { d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az; }
                         continue;
@@ -1914,7 +1920,8 @@ void Replicator::applyTargets(GameWorld* gw) {
                     d.taskApplied = false; d.taskBad = false; d.goalsCleared = false;
                     { char b[128]; _snprintf(b, sizeof(b) - 1,
                         "[trust] revoke hand=%u,%u reason=%s drift=%.1f",
-                        out.hIndex, out.hSerial, agree ? "drift" : "task", drift);
+                        out.hIndex, out.hSerial,
+                        combatMirror ? "mirror" : (agree ? "drift" : "task"), drift);
                       b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
                     // fall through: the normal drive re-engages below this tick
                 } else if (d.agreeStreak >= TRUST_STREAK_FRAMES) {

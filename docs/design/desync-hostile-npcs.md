@@ -333,6 +333,38 @@ ring stance near the target) is unaffected.
     (p90). An episode younger than that, hit by such a gap, now disarms and
     re-arms: one extra order. `combat_crowd`'s re-order limit (18) is the
     check.
+- **Second-cut A/B (2026-10-29 11:20-11:48, cell auth on, interleaved):
+  the fix works.**
+
+  | arm | runs | one_sided_fight | mint_aggro parity | verdict |
+  |---|---|---|---|---|
+  | mirror on  | 112050, 112619, 113129 | PASS x3 | PASS x3 | PASS x3 |
+  | mirror off | 112345, 112854, 113404 | FAIL x3 (join streaks 4, 5, 4) | FAIL x3 (0.36, 0.48, 0.48) | FAIL x3 |
+
+  - `hold BREAK` disarm cycles: 41-78 per run with the mirror off, 1-14 with
+    it on.
+  - **Regressions:**
+    - `combat_battle` (114354) and `assault_travel` (114617) passed.
+    - `combat_crowd` passed 2 of 3 (113637, 114129). The first cut's
+      re-order loop did not recur: the most re-orders on any hand was 11-15
+      (limit 18).
+    - Crowd 113902 failed on coverage, not tracking: "only 2 crowd hand(s)
+      present in both series".
+      - Of 5 strikers, 1,1723144576 was knocked down at 11:40:26 and
+        1,3823120128 was upright for 13 of 110 host samples, so the oracle
+        skips both.
+      - The host stopped logging 1,753417984 and 1,3996215808 at
+        11:40:20-21, four seconds into the fight. The joiner had granted
+        trust to 1,3996215808 at 11:40:09.
+      - First occurrence in any saved run. Not shown to be caused by the
+        mirror; 1,3996215808 was never mirrored.
+- **Defect found by reading, fixed (trust guard).** The trust block
+  (divergence-gated authority) assumed "bodies in host-reported combat never
+  reach here". A mirrored body now does. Trust would hand it back to its own
+  AI, the join-only fight the mirror exists to stop. A mirrored body now
+  counts as disagreeing: its streak resets and any trust is revoked (logged
+  `reason=mirror`). No run showed it happening, but it changes behaviour
+  only for mirrored bodies, so it needs one confirmation run set.
 - **A/B gate:** `mint_aggro` x3 with the gate on and x3 with it off.
   `one_sided_fight` must fail with the gate off and pass with it on.
 - **Regression:**
